@@ -1,0 +1,15 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Downloaded and generated datasets
+ucf_crime/
+xd_violence/
+
+# Local papers and documents
+*.pdf
+
+# Runtime outputs
+output/
+logs/
+
