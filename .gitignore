@@ -13,3 +13,5 @@ xd_violence/
 output/
 logs/
 
+wget-log
+.checkpoints/
