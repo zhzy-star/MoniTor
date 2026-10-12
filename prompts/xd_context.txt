@@ -1,0 +1,1 @@
+Assess the currently observed scene using the captions, past memory, and prior predictions. Consider fighting, shooting, riot, abuse, car accidents, and explosions as possible anomalies. Distinguish observed evidence from speculation. Assign a low score to ordinary activity without evidence of an anomaly.

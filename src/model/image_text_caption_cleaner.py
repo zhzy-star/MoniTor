@@ -9,12 +9,12 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-sys.path.append("libs/ImageBind")
-from libs.ImageBind.imagebind import data
-from libs.ImageBind.imagebind.models.imagebind_model import ModalityType
+from imagebind import data
+from imagebind.models.imagebind_model import ModalityType
 from src.data.video_record import VideoRecord
 from src.utils.path_utils import find_unprocessed_videos
 from src.utils.sample_utils import uniform_temporal_subsample
+from src.utils.retrieval_utils import search_past_captions
 from src.utils.torch_utils import initialize_vlm_model_and_device
 
 
@@ -78,30 +78,9 @@ class ImageTextCaptionCleaner:
             faiss.normalize_L2(search_vectors)
 
 
-            distances = []
-            indices = []
-            cnt = 1
-
-            for i, vector in enumerate(search_vectors):
-            # Create a sub-index using the first 'cnt' elements
-                index_tmp = faiss.IndexFlatL2(index.d)  # Assuming 'index' is IndexFlatL2, you may need to adapt to your index type
-                index_tmp.add(index.reconstruct_n(0, min(cnt,index.ntotal)))  # Add vectors from the original index to the temporary sub-index
-    
-                distances_i, indices_i = index_tmp.search(np.array([vector]),  min(max(1,self.num_neighbors),batch_start_frame+1))
-                distances.append(distances_i[0])
-                
-    
-                indices.append(indices_i[0].tolist())
-                cnt += 1
-            def get_list_dimensions(lst):
-                if isinstance(lst, list):
-                    return [len(lst)] + get_list_dimensions(lst[0]) if len(lst) > 0 else []
-                else:
-                    return []
-
-            dimensions = get_list_dimensions(indices)
-            distances = np.array(distances)
-            indices = np.array(indices,dtype=object)
+            distances, indices = search_past_captions(
+                index, file_names, search_vectors, batch_frame_idxs, self.num_neighbors
+            )
 
             self._retrieve_captions(
                 indices,
@@ -140,6 +119,10 @@ class ImageTextCaptionCleaner:
             for clip_frame_paths in batch_clip_frame_paths
         ]
 
+        self._sample_centers = [
+            center for center, paths in zip(batch_center_frame_idxs, batch_clip_subsample_frame_paths)
+            for _ in paths
+        ]
         batch_frame_paths = [
             frame_path
             for clip_frame_paths in batch_clip_subsample_frame_paths
@@ -182,7 +165,7 @@ class ImageTextCaptionCleaner:
             with open(video_caption_path) as f:
                 video_captions = json.load(f)
 
-            center_frame_idx = batch_center_frame_idxs[idx // self.num_samples]
+            center_frame_idx = self._sample_centers[idx]
 
             video_captions_retrieved[str(center_frame_idx)][str(frame_idx)] = video_captions[
                 ret_index

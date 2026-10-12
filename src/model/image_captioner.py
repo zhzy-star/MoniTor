@@ -11,7 +11,17 @@ from src.data.video_record import VideoRecord
 from src.utils.image_utils import load_images_from_paths
 from src.utils.path_utils import find_unprocessed_videos
 
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+def resolve_pretrained_model(pretrained_model_name):
+    """Keep explicit local paths local, including when the directory is missing."""
+    pretrained_model_name = os.fspath(pretrained_model_name)
+    path = Path(pretrained_model_name).expanduser()
+    is_local = path.is_absolute() or pretrained_model_name.startswith(("./", "../", "~")) or path.exists()
+    if is_local:
+        if not path.is_dir():
+            raise FileNotFoundError(f"BLIP model directory does not exist: {path}")
+        return str(path.resolve()), True
+    return pretrained_model_name, False
 
 
 class ImageCaptioner:
@@ -23,6 +33,8 @@ class ImageCaptioner:
         pretrained_model_name,
         dtype_str,
         output_dir,
+        device_map=None,
+        max_gpu_memory="20GiB",
     ):
         self.batch_size = batch_size
         self.frame_interval = frame_interval
@@ -31,11 +43,25 @@ class ImageCaptioner:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
  
 
-        self.processor = Blip2Processor.from_pretrained("Blip2")
-        self.model = Blip2ForConditionalGeneration.from_pretrained(
-            "Blip2", torch_dtype=self.dtype
+        model_path, is_local = resolve_pretrained_model(pretrained_model_name)
+        # The pinned tokenizers version cannot parse newer tokenizer.json files.
+        # Load the bundled SentencePiece/BPE vocabulary with the slow tokenizer.
+        self.processor = Blip2Processor.from_pretrained(
+            model_path, local_files_only=is_local, use_fast=False
         )
-        self.model.to(self.device)
+        loading_options = dict(torch_dtype=self.dtype, local_files_only=is_local)
+        if device_map == "auto":
+            if self.device != "cuda":
+                raise ValueError("--device_map auto requires a CUDA device")
+            loading_options.update(
+                device_map="auto", low_cpu_mem_usage=True,
+                max_memory={index: max_gpu_memory for index in range(torch.cuda.device_count())},
+            )
+            loading_options["max_memory"]["cpu"] = "120GiB"
+        self.model = Blip2ForConditionalGeneration.from_pretrained(model_path, **loading_options)
+        if device_map is None:
+            self.model.to(self.device)
+        self.model.eval()
         self.output_dir = Path(output_dir)
 
     def _get_dtype(self, dtype_str):
@@ -92,6 +118,8 @@ def run(
     dtype,
     resume,
     pathname,
+    device_map=None,
+    max_gpu_memory="20GiB",
 ):
     captioner = ImageCaptioner(
         batch_size,
@@ -100,6 +128,8 @@ def run(
         pretrained_model_name,
         dtype,
         output_dir,
+        device_map=device_map,
+        max_gpu_memory=max_gpu_memory,
     )
 
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
@@ -118,7 +148,9 @@ def parse_args():
     parser.add_argument("--frame_interval", type=int, default=16)
     parser.add_argument("--imagefile_template", type=str, default="{:06d}.jpg")
     parser.add_argument(
-        "--pretrained_model_name", type=str, default="Salesforce/blip2-opt-6.7b-coco"
+        "--pretrained_model_name", type=str,
+        default="/root/autodl-tmp/models/blip2-opt-6.7b-coco",
+        help="Local BLIP2 directory or explicit Hugging Face model ID",
     )
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument(
@@ -130,6 +162,8 @@ def parse_args():
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--pathname", type=str, default="*.json")
+    parser.add_argument("--device_map", choices=["auto"], help="Allocate model layers across GPU and CPU")
+    parser.add_argument("--max_gpu_memory", default="20GiB", help="Per-GPU weight budget for automatic placement")
     return parser.parse_args()
 
 
@@ -146,4 +180,6 @@ if __name__ == "__main__":
         args.dtype,
         args.resume,
         args.pathname,
+        device_map=args.device_map,
+        max_gpu_memory=args.max_gpu_memory,
     )

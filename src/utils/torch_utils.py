@@ -1,6 +1,6 @@
 import torch
 
-from libs.ImageBind.imagebind.models.imagebind_model import imagebind_huge
+from imagebind.models.imagebind_model import imagebind_huge
 
 
 def initialize_vlm_model_and_device() -> torch.nn.Module:

@@ -9,9 +9,8 @@ import faiss
 import torch
 from tqdm import tqdm
 
-sys.path.append("libs/ImageBind")
-from libs.ImageBind.imagebind import data
-from libs.ImageBind.imagebind.models.imagebind_model import ModalityType
+from imagebind import data
+from imagebind.models.imagebind_model import ModalityType
 from src.data.video_record import VideoRecord
 from src.utils.torch_utils import initialize_vlm_model_and_device
 

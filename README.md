@@ -49,11 +49,32 @@ Please download the data, including captions, temporal summaries, indexes with t
   [Download XD-Violence features](https://drive.google.com/file/d/1yzDP1lVwPlA_BS2N5Byr1PcaazBklfkI/view)  
   Includes: temporal annotations, video embeddings, and textual captions.
 
-After downloading, extract the contents into the following directory structure:
+For the local UCF-Crime test setup, `configs/ucf.json` uses the restored relative
+video links under `/root/autodl-tmp/video_add/ucf_crime/videos/test` and the
+official filename order from `/root/autodl-tmp/video_add/ucf_crime/splits/test.txt`.
+The directory name is `ucf_crime` (underscore). Temporal ground truth is read
+from `/root/autodl-tmp/video_add/ucf_crime/annotations/temporal_test.txt`.
+
+Extracted frames and generated artifacts stay in the repository's
+`ucf_crime/` directory. Each video gets a frame directory named after its
+filename stem, with zero-based `000000.jpg`, `000001.jpg`, etc. The generated
+`ucf_crime/annotations/test.txt` records `video_name 0 last_frame_id 0`; the last
+frame ID is inclusive. Evaluation derives anomaly labels from temporal ground
+truth rather than that placeholder category column.
 
 # Pretrained models
 
 We use **Blip2** as our VLM following [lavad](https://github.com/lucazanella/lavad?tab=readme-ov-file).
+
+The UCF configuration loads all five models from `/root/autodl-tmp/models`:
+`blip2-flan-t5-xl`, `blip2-flan-t5-xl-coco`, `blip2-flan-t5-xxl`,
+`blip2-opt-6.7b`, and `blip2-opt-6.7b-coco`. Change `model_root` in
+`configs/ucf.json` to use another local model directory. Processor and model
+loading use `local_files_only=True` for local paths; a missing local directory
+raises an error. The captioner also accepts an explicit model directory through
+`--pretrained_model_name`.
+The processor uses `use_fast=False` so the pinned tokenizer runtime can read
+the bundled SentencePiece/BPE vocabularies in the local model folders.
 
 # LLM Agent
 
@@ -67,12 +88,74 @@ You are free to use other models from the **GLM** family depending on your requi
 
 Since our method is **training-free Video Anomaly Detection (VAD)**, only the evaluation process is required.
 
-After completing the frame extraction step via:
+Run stages from the repository root with the active `Moni` environment:
+
+To run all five caption models and the complete UCF test pipeline:
 
 ```bash
-bash scripts/00_extract_frames.sh
-bash slurm/<dataset>/01_XXX.sh
-bash slurm/<dataset>/02_XXX.sh
-···
-bash slurm/<dataset>/07_XXX.sh
+cd /root/autodl-tmp/MoniTor
+conda activate Moni
+# ZHIPUAI_API_KEY must already be exported in this shell.
+bash scripts/run_ucf_all.sh
+```
+
+The script uses `/root/miniconda3/envs/Moni/bin/python` by default, runs stages
+sequentially, and writes stage logs under `logs/ucf_<timestamp>_<pid>/`. Configure
+the Python executable with `PYTHON` and the JSON config with `UCF_CONFIG`.
+The UCF config enables automatic GPU/CPU layer placement with a `20GiB` GPU
+weight budget for each BLIP model. This allows larger models to use CPU RAM;
+CPU offloading can substantially slow the XXL model.
+
+Run an individual stage range, or continue after a completed stage:
+
+```bash
+bash scripts/run_ucf_all.sh extract extract
+bash scripts/run_ucf_all.sh caption evaluate
+bash scripts/run_ucf_all.sh score evaluate
+```
+
+Caption, cleaning, summary, score, and refinement stages skip videos with
+existing output JSON files. Index stages rebuild their indexes. Extraction
+refuses to overwrite an existing generated video list, so start at `caption`
+after extraction has completed. If prompts or upstream artifacts change,
+select fresh output paths in a copied config to avoid reusing old results.
+
+```bash
+conda activate Moni
+# Preview the source paths and model commands without executing them.
+bash scripts/reproduce.sh --config configs/ucf.json --stage extract --dry-run
+bash scripts/reproduce.sh --config configs/ucf.json --stage caption --dry-run
+
+# Run one stage at a time when ready.
+bash scripts/reproduce.sh --config configs/ucf.json --stage extract
+bash scripts/reproduce.sh --config configs/ucf.json --stage caption --resume
+bash scripts/reproduce.sh --config configs/ucf.json --stage caption-index
+bash scripts/reproduce.sh --config configs/ucf.json --stage clean --resume
+```
+
+Set `ZHIPUAI_API_KEY` in the environment before the summary and scoring stages:
+
+```bash
+bash scripts/reproduce.sh --config configs/ucf.json --stage summarize --resume
+bash scripts/reproduce.sh --config configs/ucf.json --stage score
+bash scripts/reproduce.sh --config configs/ucf.json --stage summary-index
+bash scripts/reproduce.sh --config configs/ucf.json --stage refine --resume
+bash scripts/reproduce.sh --config configs/ucf.json --stage evaluate --score-source raw
+bash scripts/reproduce.sh --config configs/ucf.json --stage evaluate --score-source refined
+```
+
+`--check` validates stage inputs without loading model weights or calling an
+API. Extraction preserves the official test split order and writes each source
+frame once. It refuses to overwrite an existing generated video list.
+Caption JSON files are named `<video_name>.json` with source frame keys
+`"0"`, `"16"`, `"32"`, etc. Evaluation writes metrics and aligned frame arrays
+under `output/ucf/raw` or `output/ucf/refined`.
+
+The original checkout omitted the summary conversion stage and complete prompt
+files. `src/model/summarize_captions.py` and `prompts/` supply reviewable defaults;
+these prompts have not been verified against the paper's exact experimental
+prompts. CPU checks validate pipeline behavior, not the reported paper metrics:
+
+```bash
+python -m unittest discover -s tests -v
 ```

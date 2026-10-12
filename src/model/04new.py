@@ -1,6 +1,7 @@
 #You can replace any prompt with a Chinese version for better performance.
 import argparse
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from src.data.video_record import VideoRecord
 from zhipuai import ZhipuAI
+from src.utils.path_utils import find_unprocessed_videos
 
 class GLMAnomalyScorer:
     def __init__(
@@ -70,7 +72,7 @@ class GLMAnomalyScorer:
         summary = self.client.chat.completions.create(
             model="glm-4-flash",
             messages=[
-                {"role": "system", "content": "summary_prompt."}, # modify to your summary prompt
+                {"role": "system", "content": "Please summarize the following descriptions into a concise sentence."}, # modify to your summary prompt
                 {"role": "user", "content": combined_text}
             ],
             stream=False,
@@ -82,7 +84,10 @@ class GLMAnomalyScorer:
     def _calculate_similarity(self, text1, text2):
         # Use TF-IDF Vectorizer to convert text to vectors
         vectorizer = TfidfVectorizer()
-        tfidf_matrix = vectorizer.fit_transform([text1, text2])
+        try:
+            tfidf_matrix = vectorizer.fit_transform([text1, text2])
+        except ValueError:
+            return 1.0 if text1 == text2 else 0.0
 
         # Calculate cosine similarity between the vectors
         similarity_matrix = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])
@@ -171,7 +176,7 @@ class GLMAnomalyScorer:
             self.prediction2 = prediction_result
 
             # **Construct scoring dialog including prediction result**
-            scoring_prompt = (prompt + f"\n{memory_info}\nPrediction from the previous frame: '{self.prediction1}'")
+            scoring_prompt = (prompt + f"\n{memory_info}\nPrediction from the previous frame: '{prediction_result}'")
 
             scoring_dialog = [
                 {"role": "system", "content": scoring_prompt},
@@ -206,8 +211,7 @@ class GLMAnomalyScorer:
                         temperature=0.6  # Lower temperature to reduce randomness
                     )
                 except Exception as e:
-                    print(f"API request failed during scoring: {e}")
-                    continue
+                    raise RuntimeError(f"Scoring failed at frame {frame_idx} of {video.path}") from e
 
                 result_content = response.choices[0].message.content
                 results.append({"generation": {"content": result_content, "prompt": dialog[0]["content"], "caption": dialog[1]["content"]}})
@@ -217,7 +221,7 @@ class GLMAnomalyScorer:
                 response = result["generation"]["content"]
                 current_score = self._parse_score(response)
                 previous_score = video_scores.get(str(frame_idx - self.frame_interval), None)
-                if previous_score is not None and previous_score != -1:
+                if current_score != -1 and previous_score is not None and previous_score != -1:
                     score = round(0.6 * current_score + 0.4 * previous_score, 1)
                 else:
                     score = round(current_score, 1)
@@ -231,7 +235,7 @@ class GLMAnomalyScorer:
         # Smoothing scores
         sorted_indices = sorted(video_scores.keys(), key=lambda x: int(x))
         scores = [video_scores[idx] for idx in sorted_indices]
-        smoothed_scores = np.convolve(scores, np.ones(3) / 3, mode='valid')
+        smoothed_scores = np.convolve(scores, np.ones(3) / 3, mode='valid') if len(scores) >= 3 else scores
         smoothed_scores = [round(score, 1) for score in smoothed_scores]
         for i, idx in enumerate(sorted_indices[:len(smoothed_scores)]):
             video_scores[idx] = smoothed_scores[i]
@@ -248,12 +252,11 @@ class GLMAnomalyScorer:
         try:
             with open(temporal_captions_path) as f:
                 temporal_captions = json.load(f)
-        except FileNotFoundError:
-            print(f"Captions not found for video {video_name}")
-            return
-        except json.JSONDecodeError:
-            print(f"Failed to parse captions for video {video_name}")
-            return
+        except (FileNotFoundError, json.JSONDecodeError) as error:
+            raise ValueError(f"Cannot load captions for {video_name}") from error
+        expected = {str(idx) for idx in range(0, video.num_frames, self.frame_interval)}
+        if set(temporal_captions) != expected or not all(isinstance(value, str) and value.strip() for value in temporal_captions.values()):
+            raise ValueError(f"Expected one nonempty string caption per sampled frame for {video_name}")
 
         video_scores = self._score_temporal_summaries(video, temporal_captions)
         output_path = Path(self.output_scores_dir) / f"{video_name}.json"
@@ -278,8 +281,11 @@ def run(
     captions_dir,
     api_key,
     num_jobs,
+    resume=False,
 ):
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
+    if resume:
+        video_list = find_unprocessed_videos(video_list, output_scores_dir, "*.json")
 
     scorer_params = {
         "api_key": api_key,
@@ -293,7 +299,7 @@ def run(
     }
 
     with ProcessPoolExecutor(max_workers=num_jobs) as executor:
-        executor.map(process_video_parallel, video_list, [scorer_params] * len(video_list))
+        list(executor.map(process_video_parallel, video_list, [scorer_params] * len(video_list)))
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -301,13 +307,21 @@ def parse_args():
     parser.add_argument("--annotationfile_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--frame_interval", type=int, default=16)
-    parser.add_argument("--context_prompt", type=str)
-    parser.add_argument("--format_prompt", type=str)
-    parser.add_argument("--output_scores_dir", type=str)
-    parser.add_argument("--captions_dir", type=str)
-    parser.add_argument("--api_key", type=str)
+    parser.add_argument("--context_prompt", type=str, required=True)
+    parser.add_argument("--format_prompt", type=str, required=True)
+    parser.add_argument("--output_scores_dir", type=str, required=True)
+    parser.add_argument("--captions_dir", type=str, required=True)
+    parser.add_argument("--api_key", type=str, default=os.environ.get("ZHIPUAI_API_KEY"))
     parser.add_argument("--num_jobs", type=int, default=1)
-    return parser.parse_args()
+    parser.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
+    if not args.api_key:
+        parser.error("Set ZHIPUAI_API_KEY or provide --api_key")
+    if args.batch_size != 1:
+        parser.error("Online queue updates require --batch_size 1")
+    if args.frame_interval < 1 or args.num_jobs < 1:
+        parser.error("frame_interval and num_jobs must be positive")
+    return args
 
 if __name__ == "__main__":
     args = parse_args()
@@ -322,4 +336,5 @@ if __name__ == "__main__":
         captions_dir=args.captions_dir,
         api_key=args.api_key,
         num_jobs=args.num_jobs,
+        resume=args.resume,
     )

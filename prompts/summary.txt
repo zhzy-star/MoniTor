@@ -1,0 +1,1 @@
+Summarize these chronologically ordered descriptions of the observed scene in one concise sentence. Describe only visible actions and events. Do not invent future events or add an anomaly score.

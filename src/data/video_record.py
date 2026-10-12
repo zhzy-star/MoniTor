@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 from typing import List, Union
 
 
@@ -17,11 +17,16 @@ class VideoRecord:
     """
 
     def __init__(self, row, root_datapath):
+        if len(row) != 4:
+            raise ValueError("Video records require: video_name start_frame end_frame label")
         self._data = row
-        self._path = os.path.join(root_datapath, row[0])
+        self._path = Path(root_datapath) / row[0]
+        if self.start_frame != 0 or self.end_frame < self.start_frame:
+            raise ValueError("The reproduction pipeline requires zero-based, inclusive frame ranges")
+        self.label  # Validate the label column at the input boundary.
 
     @property
-    def path(self) -> str:
+    def path(self) -> Path:
         return self._path
 
     @property

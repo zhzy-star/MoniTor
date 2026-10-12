@@ -1,0 +1,7 @@
+# Keep the existing environment specification and local edits intact.
+-r requirement.txt
+tqdm
+Pillow
+zhipuai>=2,<3
+# Required by the checked-in ImageBind submodule.
+pytorchvideo @ git+https://github.com/facebookresearch/pytorchvideo.git@6cdc929315aab1b5674b6dcf73b16ec99147735f

@@ -1,0 +1,6 @@
+# Score evaluation and synthetic pipeline checks; no model runtime required.
+numpy>=1.23,<2
+scikit-learn>=1.2,<2
+opencv-python-headless>=4.7,<5
+Pillow>=9
+tqdm>=4.64

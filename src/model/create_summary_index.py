@@ -7,15 +7,13 @@ from typing import List
 
 from src.data.video_record import VideoRecord
 
-sys.path.append("libs/ImageBind")
 import faiss
-import faiss.contrib.torch_utils
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from libs.ImageBind.imagebind import data
-from libs.ImageBind.imagebind.models.imagebind_model import ModalityType, imagebind_huge
+from imagebind import data
+from imagebind.models.imagebind_model import ModalityType, imagebind_huge
 from src.utils.torch_utils import initialize_vlm_model_and_device
 
 

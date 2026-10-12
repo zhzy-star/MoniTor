@@ -8,12 +8,12 @@ import numpy as np
 import torch
 from tqdm import tqdm
 #leonardo_work
-sys.path.append("libs/ImageBind")
-from libs.ImageBind.imagebind import data
-from libs.ImageBind.imagebind.models.imagebind_model import ModalityType
+from imagebind import data
+from imagebind.models.imagebind_model import ModalityType
 from src.data.video_record import VideoRecord
 from src.utils.path_utils import find_unprocessed_videos
 from src.utils.sample_utils import uniform_temporal_subsample
+from src.utils.retrieval_utils import search_past_captions
 from src.utils.torch_utils import initialize_vlm_model_and_device
 
 
@@ -85,17 +85,17 @@ class VideoTextScoreRefiner:
         return batch_clip_subsample_frame_paths
 
     def _load_and_transform_data(self, batch_frame_paths):
-        inputs = {
-            ModalityType.VISION: data.load_and_transform_video_data(
-                batch_frame_paths, self.device
-            ),
-        }
-        return inputs
+        # ImageBind's video loader expects encoded files, while this pipeline
+        # supplies lists of JPEGs. Stack transformed past frames as image views;
+        # ImageBind averages the view embeddings for each clip.
+        return [data.load_and_transform_vision_data(paths, self.device) for paths in batch_frame_paths]
 
     def _calculate_search_vectors(self, inputs):
         with torch.no_grad():
-            embeddings = self.model(inputs)
-            search_vectors = embeddings[ModalityType.VISION].cpu().numpy()
+            search_vectors = np.stack([
+                self.model({ModalityType.VISION: clip})[ModalityType.VISION]
+                .mean(dim=0).cpu().numpy() for clip in inputs
+            ])
         return search_vectors
 
     def _retrieve_captions(
@@ -117,7 +117,7 @@ class VideoTextScoreRefiner:
             nn_file_names = {}
             frame_pos = {}
             #for nn_idx in range(self.num_neighbors):
-            for nn_idx in range(min(max(1,self.num_neighbors),batch_start_frame+1)):
+            for nn_idx in range(len(indices[idx])):
                 #print(f"indices length: {len(indices)}, file_names length: {len(file_names)}")
                 #print(f"indices[{idx}] length: {len(indices[idx])}, indices[{idx}][{nn_idx}] value: {indices[idx][nn_idx]}")
 
@@ -193,33 +193,9 @@ class VideoTextScoreRefiner:
             inputs = self._load_and_transform_data(batch_clip_frame_paths)
             search_vectors = self._calculate_search_vectors(inputs)
             faiss.normalize_L2(search_vectors)
-            print(search_vectors.shape)
-            #"""
-            distances = []
-            indices = []
-            cnt = 1
-
-            for i, vector in enumerate(search_vectors):
-            # Create a sub-index using the first 'cnt' elements
-                index_tmp = faiss.IndexFlatL2(index.d)  # Assuming 'index' is IndexFlatL2, you may need to adapt to your index type
-                index_tmp.add(index.reconstruct_n(0, min(cnt,index.ntotal)))  # Add vectors from the original index to the temporary sub-index
-    
-                distances_i, indices_i = index_tmp.search(np.array([vector]),  min(max(1,self.num_neighbors),batch_start_frame+1))
-                distances.append(distances_i[0])
-                
-    
-                indices.append(indices_i[0].tolist())
-                cnt += 1
-            
-            def get_list_dimensions(lst):
-                if isinstance(lst, list):
-                    return [len(lst)] + get_list_dimensions(lst[0]) if len(lst) > 0 else []
-                else:
-                    return []
-
-            dimensions = get_list_dimensions(indices)
-            distances = np.array(distances)
-            indices = np.array(indices,dtype=object)
+            distances, indices = search_past_captions(
+                index, file_names, search_vectors, batch_center_frame_idxs, self.num_neighbors
+            )
 
             self._retrieve_captions(
                 distances,
@@ -274,7 +250,7 @@ class VideoTextScoreRefiner:
             for idx, frame_idx in enumerate(batch_center_frame_idxs):
                 frame_scores = {}
                 #for nn_idx in range(self.num_neighbors):
-                for nn_idx in range(min(max(1,self.num_neighbors),batch_start_frame+1)):
+                for nn_idx in sorted(ret_file_names_nn[str(frame_idx)], key=int):
                     file_name = ret_file_names_nn[str(frame_idx)][str(nn_idx)]
                     ret_index = file_name.split("/")[-1]
                     frame_scores[str(nn_idx)] = video_scores[ret_index]
@@ -331,7 +307,7 @@ def run(
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
     video_list = np.array_split(video_list, num_jobs)[job_id]
     if resume:
-        video_list = find_unprocessed_videos(video_list, output_summary_dir, pathname)
+        video_list = find_unprocessed_videos(video_list, output_scores_dir, pathname)
 
     for video in video_list:
         video_text_score_refiner.retrieve_nn(video)
