@@ -3,12 +3,12 @@ import argparse
 import json
 import os
 import re
-import time
+from contextlib import contextmanager
+from threading import Lock, local
 from pathlib import Path
-from typing import List
 import numpy as np
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from src.data.video_record import VideoRecord
@@ -26,7 +26,15 @@ class GLMAnomalyScorer:
         format_prompt,
         output_scores_dir,
         captions_dir,
+        request_workers=3,
+        prefetch_frames=1,
     ):
+        if batch_size != 1:
+            raise ValueError("Online queue updates require batch_size=1")
+        if isinstance(request_workers, bool) or not isinstance(request_workers, int) or request_workers < 1:
+            raise ValueError("request_workers must be a positive integer")
+        if isinstance(prefetch_frames, bool) or not isinstance(prefetch_frames, int) or prefetch_frames not in (0, 1):
+            raise ValueError("prefetch_frames must be 0 or 1")
         self.api_key = api_key
         self.root_path = root_path
         self.batch_size = batch_size
@@ -36,6 +44,11 @@ class GLMAnomalyScorer:
         self.output_scores_dir = output_scores_dir
         self.captions_dir = captions_dir
         self.client = ZhipuAI(api_key=self.api_key)
+        self.request_workers = request_workers
+        self.prefetch_frames = prefetch_frames
+        self._request_local = local()
+        self._worker_clients = []
+        self._clients_lock = Lock()
 
         # Initialize the score queue
         self.score_queue = {score: [] for score in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]}
@@ -66,10 +79,37 @@ class GLMAnomalyScorer:
         if score in self.score_queue:
             self.score_queue[score].append(frame_idx)
 
-    def _lstm_summarize(self, texts):
+    @contextmanager
+    def _preparation_executor(self):
+        # The main thread alone scores and updates state; workers only read captions.
+        executor = None
+        if self.request_workers > 1 or self.prefetch_frames:
+            executor = ThreadPoolExecutor(max_workers=self.request_workers,
+                                          thread_name_prefix="score-prepare")
+        try:
+            yield executor
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            for client in self._worker_clients:
+                close = getattr(client, "close", None)
+                if close is not None:
+                    close()
+            self._worker_clients.clear()
+
+    def _preparation_request(self, operation, *args):
+        # Each preparation thread owns a client; the scoring client stays separate.
+        if not hasattr(self._request_local, "client"):
+            client = ZhipuAI(api_key=self.api_key)
+            self._request_local.client = client
+            with self._clients_lock:
+                self._worker_clients.append(client)
+        return operation(*args, client=self._request_local.client)
+
+    def _lstm_summarize(self, texts, client=None):
         # Simulate LSTM-based summarization by combining texts into a summary
         combined_text = " ".join(texts)
-        summary = self.client.chat.completions.create(
+        summary = (client if client is not None else self.client).chat.completions.create(
             model="glm-4-flash",
             messages=[
                 {"role": "system", "content": "Please summarize the following descriptions into a concise sentence."}, # modify to your summary prompt
@@ -95,7 +135,7 @@ class GLMAnomalyScorer:
 
         return similarity_score
 
-    def _prepare_memory_summaries(self, captions, current_idx):
+    def _select_memories(self, captions, current_idx):
         # Prepare long-term memory (summarizing previous 5 seconds of descriptions)
         long_term_captions = [
             captions[str(i)] for i in range(max(0, current_idx - 5 * self.frame_interval), current_idx, self.frame_interval)
@@ -112,18 +152,50 @@ class GLMAnomalyScorer:
                 if similarity < forgetting_threshold:
                     filtered_long_term_captions.append(caption)
 
-        self.long_term_memory = filtered_long_term_captions[-5:]  # Limit long-term memory to 5 descriptions
-        long_term_summary = self._lstm_summarize(self.long_term_memory) if self.long_term_memory else "No long-term memory"
+        long_term_memory = filtered_long_term_captions[-5:]  # Limit long-term memory to 5 descriptions
 
         # Prepare short-term memory (summarizing the last 2 frames)
         short_term_captions = [
             captions[str(current_idx - i * self.frame_interval)] for i in range(1, 3)
             if str(current_idx - i * self.frame_interval) in captions
         ]
-        self.short_term_memory = short_term_captions[-2:]  # Keep only the latest 2 frame descriptions
-        short_term_summary = self._lstm_summarize(self.short_term_memory) if self.short_term_memory else "No short-term memory"
+        return long_term_memory, short_term_captions[-2:]
 
-        return long_term_summary, short_term_summary
+    def _predict(self, previous_caption, client=None):
+        prediction_prompt = ("If you are law enforcement, please predict what might happen next in the described scene, considering potential suspicious activities or behaviors, "
+                             "such as abuse, arrest, arson, assault, burglary, disturbing the peace, explosion, fighting, robbery, shooting, stealing, shoplifting, or vandalism. "
+                             "Please provide a concise prediction based on the current context.\n"
+                             "Please provide the prediction in a concise sentence, focusing on describing the behavior or event that might occur next in the scene, avoiding any additional explanations.")
+        response = (client if client is not None else self.client).chat.completions.create(
+            model="glm-4-flash",
+            messages=[
+                {"role": "system", "content": prediction_prompt},
+                {"role": "user", "content": f"The description of the previous frame is: '{previous_caption}', please provide the description of the next frame."}
+            ],
+            stream=False,
+            timeout=60,
+            temperature=0.6
+        )
+        return response.choices[0].message.content.strip()
+
+    def _submit_preparation(self, captions, frame_idx, executor):
+        long_memory, short_memory = self._select_memories(captions, frame_idx)
+
+        def submit(operation, value, fallback):
+            if value is not None and executor is not None:
+                return executor.submit(self._preparation_request, operation, value)
+            future = Future()
+            future.set_result(operation(value) if value is not None else fallback)
+            return future
+
+        return long_memory, short_memory, (
+            submit(self._lstm_summarize, long_memory or None, "No long-term memory"),
+            submit(self._lstm_summarize, short_memory or None, "No short-term memory"),
+            submit(self._predict,
+                   captions.get(str(frame_idx - self.frame_interval), "No previous caption available")
+                   if frame_idx - self.frame_interval >= 0 else None,
+                   "No previous frame available for prediction"),
+        )
 
     def _prepare_score_prompts(self, captions):
         # Prepare score queue information to be used as a prompt for scoring
@@ -135,73 +207,53 @@ class GLMAnomalyScorer:
                 score_prompts.append(f"Event with score {score}: '{caption}'.")
         return "\n".join(score_prompts)
 
-    def _prepare_dialogs(self, captions, batch_frame_idxs):
+    def _prepare_dialog(self, captions, idx, prepared):
         # Get score queue information as part of the prompt
         score_prompts = self._prepare_score_prompts(captions)
         prompt = self.context_prompt + " " + self.format_prompt + "\n" + score_prompts
 
-        scoring_dialogs = []  # Store scoring dialogs
+        # Resolve in frame order. Prefetch must never mutate the current memories.
+        long_memory, short_memory, futures = prepared
+        long_term_summary, short_term_summary, prediction_result = [future.result() for future in futures]
+        self.long_term_memory = long_memory
+        self.short_term_memory = short_memory
+        self.prediction2 = prediction_result
+        self.prediction1 = self.prediction2
+        if idx - self.frame_interval >= 0:
+            print(f"Prediction result: {prediction_result}")
 
-        for idx in batch_frame_idxs:
-            # Current frame caption
-            current_caption = f"This is the description of the current frame: '{captions[str(idx)]}'."
-
-            # Prepare long-term and short-term memory summaries
-            long_term_summary, short_term_summary = self._prepare_memory_summaries(captions, idx)
-            memory_info = f"Long-term memory contains a summary of events from the previous five seconds: {long_term_summary}. Short-term memory contains descriptions of the previous two frames: {short_term_summary}."
-
-            # **Construct prediction dialog**
-            if idx - self.frame_interval >= 0:  # Ensure there is a previous frame
-                previous_caption = captions.get(str(idx - self.frame_interval), "No previous caption available")
-                prediction_prompt = ("If you are law enforcement, please predict what might happen next in the described scene, considering potential suspicious activities or behaviors, "
-                                    "such as abuse, arrest, arson, assault, burglary, disturbing the peace, explosion, fighting, robbery, shooting, stealing, shoplifting, or vandalism. "
-                                    "Please provide a concise prediction based on the current context.\n"
-                                    "Please provide the prediction in a concise sentence, focusing on describing the behavior or event that might occur next in the scene, avoiding any additional explanations.")
-                prediction_response = self.client.chat.completions.create(
-                    model="glm-4-flash",
-                    messages=[
-                        {"role": "system", "content": prediction_prompt},
-                        {"role": "user", "content": f"The description of the previous frame is: '{previous_caption}', please provide the description of the next frame."}
-                    ],
-                    stream=False,
-                    timeout=60,
-                    temperature=0.6
-                )
-                prediction_result = prediction_response.choices[0].message.content.strip()
-                print(f"Prediction result: {prediction_result}")
-            else:
-                prediction_result = "No previous frame available for prediction"
-
-            # Store prediction for use in the next frame
-            self.prediction2 = prediction_result
-
-            # **Construct scoring dialog including prediction result**
-            scoring_prompt = (prompt + f"\n{memory_info}\nPrediction from the previous frame: '{prediction_result}'")
-
-            scoring_dialog = [
-                {"role": "system", "content": scoring_prompt},
-                {"role": "user", "content": f"{current_caption} "}
-            ]
-            scoring_dialogs.append(scoring_dialog)
-
-            # Update predictions: prediction1 becomes prediction2 for the next frame
-            self.prediction1 = self.prediction2
-
-        return scoring_dialogs
+        current_caption = f"This is the description of the current frame: '{captions[str(idx)]}'."
+        memory_info = f"Long-term memory contains a summary of events from the previous five seconds: {long_term_summary}. Short-term memory contains descriptions of the previous two frames: {short_term_summary}."
+        scoring_prompt = (prompt + f"\n{memory_info}\nPrediction from the previous frame: '{prediction_result}'")
+        return [
+            {"role": "system", "content": scoring_prompt},
+            {"role": "user", "content": f"{current_caption} "}
+        ]
 
     def _score_temporal_summaries(self, video, temporal_captions):
         video_scores = {}
-        previous_scores = {}
         fy = {}
         frame_idxs = list(range(0, video.num_frames, self.frame_interval))
 
-        for batch_start in tqdm(range(0, len(frame_idxs), self.batch_size), desc=f"Processing {video.path}", unit="batch"):
-            batch_end = min(batch_start + self.batch_size, len(frame_idxs))
-            batch_frame_idxs = frame_idxs[batch_start:batch_end]
-            scoring_dialogs = self._prepare_dialogs(temporal_captions, batch_frame_idxs)
+        with self._preparation_executor() as executor:
+            def prepare(frame_idx):
+                try:
+                    return self._submit_preparation(temporal_captions, frame_idx, executor)
+                except Exception as error:
+                    raise RuntimeError(f"Preparation failed at frame {frame_idx} of {video.path}") from error
 
-            results = []
-            for dialog, frame_idx in zip(scoring_dialogs, batch_frame_idxs):
+            prepared = prepare(frame_idxs[0]) if frame_idxs else None
+            for position, frame_idx in enumerate(tqdm(frame_idxs, desc=f"Processing {video.path}", unit="batch")):
+                try:
+                    dialog = self._prepare_dialog(temporal_captions, frame_idx, prepared)
+                except Exception as error:
+                    raise RuntimeError(f"Preparation failed at frame {frame_idx} of {video.path}") from error
+
+                next_idx = frame_idxs[position + 1] if position + 1 < len(frame_idxs) else None
+                # At most one future frame; no score prompt is built before its turn.
+                prepared = None
+                if self.prefetch_frames and next_idx is not None:
+                    prepared = prepare(next_idx)
                 try:
                     response = self.client.chat.completions.create(
                         model="glm-4-flash",
@@ -214,12 +266,7 @@ class GLMAnomalyScorer:
                     raise RuntimeError(f"Scoring failed at frame {frame_idx} of {video.path}") from e
 
                 result_content = response.choices[0].message.content
-                results.append({"generation": {"content": result_content, "prompt": dialog[0]["content"], "caption": dialog[1]["content"]}})
-
-            # Process scoring results
-            for result, frame_idx in zip(results, batch_frame_idxs):
-                response = result["generation"]["content"]
-                current_score = self._parse_score(response)
+                current_score = self._parse_score(result_content)
                 previous_score = video_scores.get(str(frame_idx - self.frame_interval), None)
                 if current_score != -1 and previous_score is not None and previous_score != -1:
                     score = round(0.6 * current_score + 0.4 * previous_score, 1)
@@ -228,9 +275,10 @@ class GLMAnomalyScorer:
 
                 self._update_score_queue(frame_idx, score)  # Update score queue
 
-                fy[str(frame_idx)] = {'new_score': score, 'raw_score': response, 'caption': result["generation"]["caption"], 'prompt': result["generation"]["prompt"]}
+                fy[str(frame_idx)] = {'new_score': score, 'raw_score': result_content, 'caption': dialog[1]["content"], 'prompt': dialog[0]["content"]}
                 video_scores[str(frame_idx)] = score
-                previous_scores[str(frame_idx)] = score
+                if not self.prefetch_frames and next_idx is not None:
+                    prepared = prepare(next_idx)
 
         # Smoothing scores
         sorted_indices = sorted(video_scores.keys(), key=lambda x: int(x))
@@ -268,7 +316,12 @@ class GLMAnomalyScorer:
 
 def process_video_parallel(video, scorer_params):
     scorer = GLMAnomalyScorer(**scorer_params)
-    scorer.process_video(video)
+    try:
+        scorer.process_video(video)
+    finally:
+        close = getattr(scorer.client, "close", None)
+        if close is not None:
+            close()
 
 def run(
     root_path,
@@ -282,6 +335,8 @@ def run(
     api_key,
     num_jobs,
     resume=False,
+    request_workers=3,
+    prefetch_frames=1,
 ):
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
     if resume:
@@ -296,6 +351,8 @@ def run(
         "format_prompt": format_prompt,
         "output_scores_dir": output_scores_dir,
         "captions_dir": captions_dir,
+        "request_workers": request_workers,
+        "prefetch_frames": prefetch_frames,
     }
 
     with ProcessPoolExecutor(max_workers=num_jobs) as executor:
@@ -313,14 +370,18 @@ def parse_args():
     parser.add_argument("--captions_dir", type=str, required=True)
     parser.add_argument("--api_key", type=str, default=os.environ.get("ZHIPUAI_API_KEY"))
     parser.add_argument("--num_jobs", type=int, default=1)
+    parser.add_argument("--request_workers", type=int, default=3,
+                        help="Preparation requests per video; scoring uses one additional client")
+    parser.add_argument("--prefetch_frames", type=int, choices=(0, 1), default=1,
+                        help="Prepare the next frame while scoring the current frame")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     if not args.api_key:
         parser.error("Set ZHIPUAI_API_KEY or provide --api_key")
     if args.batch_size != 1:
         parser.error("Online queue updates require --batch_size 1")
-    if args.frame_interval < 1 or args.num_jobs < 1:
-        parser.error("frame_interval and num_jobs must be positive")
+    if args.frame_interval < 1 or args.num_jobs < 1 or args.request_workers < 1:
+        parser.error("frame_interval, num_jobs and request_workers must be positive")
     return args
 
 if __name__ == "__main__":
@@ -337,4 +398,6 @@ if __name__ == "__main__":
         api_key=args.api_key,
         num_jobs=args.num_jobs,
         resume=args.resume,
+        request_workers=args.request_workers,
+        prefetch_frames=args.prefetch_frames,
     )

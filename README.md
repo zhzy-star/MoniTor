@@ -135,6 +135,54 @@ bash scripts/reproduce.sh --config configs/ucf.json --stage clean --resume
 
 Set `ZHIPUAI_API_KEY` in the environment before the summary and scoring stages:
 
+`summary_workers` in `configs/ucf.json` controls concurrent summary API requests
+(default UCF configuration: 8). It is independent of the BLIP `batch_size`.
+The summary CLI accepts `--workers` (default: 1) and `--max_retries` (default: 4)
+for transient connection, rate-limit, and server failures. Empty responses also
+receive bounded retries using the same request. Exhausted requests are queued
+while other frames and videos continue. Every successful frame is saved atomically
+under `caption/summary/_checkpoints/<video_name>.json`, alongside failure metadata.
+`--resume` preserves successful frames and only requests missing, retryable frames;
+it also validates and skips complete video JSON files. Partial checkpoints verify
+the exact input texts, prompt, model, temperature, and sampling interval before reuse.
+Keep those settings unchanged when reusing older complete videos.
+
+After the initial sweep, `--recovery_rounds` (default: 3) adds sweeps over retryable
+missing frames. `--recovery_delay` (default: 60 seconds) doubles between sweeps,
+capped at 300 seconds. Defaults wait 60, 120, then 240 seconds; a persistently
+failing frame receives at most 20 requests per invocation (5 per sweep).
+Explicit content-filter/refusal responses are recorded as nonretryable and require
+manual review; they do not block processing other frames. Authentication, invalid
+API parameters, invalid inputs, and disk errors still stop the stage.
+
+Only videos with all expected, nonempty summaries produce final JSON files, ordered
+by source frame ID. If any frames remain after recovery, the stage exits nonzero
+and the full pipeline stops before scoring; checkpoints retain the missing-frame
+queue for inspection and eligible requests can be retried with `--resume`. No empty
+or substitute summaries are generated. Per-frame saves add disk writes; additional
+failed requests consume time and may consume tokens. Old interrupted runs without
+checkpoints cannot recover their unsaved successful summaries. Returned summary
+token usage is appended under
+`caption/summary/_usage/<video_name>.jsonl`; it covers responses collected by the
+new implementation, not historical usage or responses lost during interruption.
+
+`score_workers` controls concurrent UCF video scoring processes (default UCF
+configuration: 8; omitted configurations retain 1). Each video keeps its own
+memory and score queue, with samples scored sequentially at `batch_size=1`.
+This setting uses the scorer's existing `--num_jobs` option and does not load
+additional GPU models. `score_request_workers` (default 3) concurrently prepares
+each frame's two memory summaries and prediction; `score_prefetch_frames` (default
+1) prepares at most the next frame while the current score request is in flight.
+The score request and queue updates remain ordered by frame. One scoring client is
+used in addition to the preparation clients per video. API request volume is
+unchanged; account rate limits can reduce the speedup. GLM uses nonzero temperature,
+so concurrent calls preserve the scoring procedure but cannot guarantee identical
+responses on a rerun. Scoring retains its existing failure and resume behavior.
+With the default 8 video workers, at most 32 API requests can be in flight across
+videos. To restore serial request scheduling, set `score_request_workers` to 1 and
+`score_prefetch_frames` to 0. Already running processes keep their loaded code.
+
+
 ```bash
 bash scripts/reproduce.sh --config configs/ucf.json --stage summarize --resume
 bash scripts/reproduce.sh --config configs/ucf.json --stage score

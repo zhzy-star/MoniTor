@@ -27,6 +27,13 @@ def read_config(path):
         if config.get(key, 0) <= 0:
             raise ValueError(f"{key} must be positive")
     models = config.get("caption_models", [])
+    for key in ("summary_workers", "score_workers", "score_request_workers"):
+        workers = config.get(key, 1)
+        if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+            raise ValueError(f"{key} must be a positive integer")
+    prefetch = config.get("score_prefetch_frames", 1)
+    if isinstance(prefetch, bool) or not isinstance(prefetch, int) or prefetch not in (0, 1):
+        raise ValueError("score_prefetch_frames must be 0 or 1")
     allowed_models = {"blip2-flan-t5-xl", "blip2-flan-t5-xl-coco", "blip2-flan-t5-xxl",
                       "blip2-opt-6.7b", "blip2-opt-6.7b-coco"}
     if not models or len(set(models)) != len(models) or not set(models) <= allowed_models:
@@ -74,11 +81,15 @@ def build_commands(config, stage, score_source="raw", resume=False):
         return [command("src.model.summarize_captions", root_path=c["root_path"],
                         annotationfile_path=c["annotationfile_path"], frame_interval=c["frame_interval"],
                         captions_dir=c["clean_captions_dir"], output_dir=c["summaries_dir"],
-                        prompt_file=c["summary_prompt_file"], resume=resume)]
+                        prompt_file=c["summary_prompt_file"], resume=resume,
+                        workers=c.get("summary_workers", 1))]
     if stage == "score":
         return [command("src.model.04new" if c["dataset"] == "ucf" else "src.model.xd_04",
                         **dict(shared, batch_size=1), captions_dir=c["summaries_dir"],
                         output_scores_dir=c["raw_scores_dir"],
+                        num_jobs=c.get("score_workers", 1) if c["dataset"] == "ucf" else None,
+                        request_workers=c.get("score_request_workers", 3) if c["dataset"] == "ucf" else None,
+                        prefetch_frames=c.get("score_prefetch_frames", 1) if c["dataset"] == "ucf" else None,
                         resume=resume,
                         context_prompt=Path(c["context_prompt_file"]).read_text().strip(),
                         format_prompt=Path(c["format_prompt_file"]).read_text().strip())]

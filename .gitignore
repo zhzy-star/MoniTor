@@ -13,5 +13,18 @@ xd_violence/
 output/
 logs/
 
+# ImageBind weight
 wget-log
 .checkpoints/
+
+# Agent memory
+agent_memory/
+AGENTS.md
+UCF_RUN_GUIDE.md
+*.md
+*.log
+
+# Test
+runs/
+
+

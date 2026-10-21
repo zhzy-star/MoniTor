@@ -216,8 +216,10 @@ class ReproductionTests(unittest.TestCase):
         def reply(**kwargs):
             calls.append(kwargs)
             content = kwargs["messages"][-1]["content"]
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
-        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=reply)))
+            payload = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason="stop")],
+                                   to_dict=lambda **options: payload)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=reply)), close=lambda: None)
         with patch.object(summary_module, "ZhipuAI", return_value=client):
             summary_module.run(self.root, records, self.root / "clean", self.root / "summaries", prompt, "test")
         self.assertEqual(len(calls), 2)
@@ -229,12 +231,14 @@ class ReproductionTests(unittest.TestCase):
             def score_reply(**kwargs):
                 content = "[0.8]" if "current frame" in kwargs["messages"][-1]["content"] else "past summary"
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
-            with patch.object(client.chat.completions, "create", side_effect=score_reply):
+            with patch.object(scorer_module, "ZhipuAI", return_value=client), \
+                 patch.object(client.chat.completions, "create", side_effect=score_reply):
                 scorer.process_video(VideoRecord(["demo", "0", "17", "0"], self.root))
             scores = json.loads((self.root / "scores" / "demo.json").read_text())
             self.assertEqual(set(scores), {"0", "16"})
             self.assertEqual(len(calculate_weighted_scores(scores, 10, 16, 18)), 18)
-            with patch.object(client.chat.completions, "create", side_effect=RuntimeError("offline")):
+            with patch.object(scorer_module, "ZhipuAI", return_value=client), \
+                 patch.object(client.chat.completions, "create", side_effect=RuntimeError("offline")):
                 with self.assertRaisesRegex(RuntimeError, "Scoring failed"):
                     scorer.process_video(VideoRecord(["demo", "0", "17", "0"], self.root))
 
