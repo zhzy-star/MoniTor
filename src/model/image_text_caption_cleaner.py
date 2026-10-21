@@ -33,6 +33,7 @@ class ImageTextCaptionCleaner:
         imagefile_template,
         batch_size,
         frame_interval,
+        paper_alignment=False,
     ):
         self.model = model
         self.device = device
@@ -46,12 +47,19 @@ class ImageTextCaptionCleaner:
         self.imagefile_template = imagefile_template
         self.batch_size = batch_size
         self.frame_interval = frame_interval
+        self.paper_alignment = paper_alignment
 
     def process_video(self, video: VideoRecord):
         video_name = Path(video.path).name
         frames_per_clip = int(self.clip_duration * self.fps)
         video_captions_retrieved = defaultdict(dict)
 
+        if self.paper_alignment:
+            marker_path = Path(self.index_dir) / f"{video_name}.paper.json"
+            marker = json.loads(marker_path.read_text())
+            if (marker.get("schema") != "caption-occurrences-v1"
+                    or marker.get("frame_interval") != self.frame_interval):
+                raise ValueError("Rebuild caption-index with paper_alignment enabled")
         index = self._load_faiss_index(video_name)
         #print(index.ntotal)
         #print(video.num_frames / 16)
@@ -69,29 +77,54 @@ class ImageTextCaptionCleaner:
             batch_center_frame_idxs = range(
                 batch_start_frame, batch_end_frame, self.frame_interval
             )
-            batch_frame_idxs, batch_frame_paths = self._prepare_frame_data(
-                video, batch_center_frame_idxs, frames_per_clip
-            )
-
-            inputs = self._load_and_transform_data(batch_frame_paths)
+            if self.paper_alignment:
+                query_paths = [Path(video.path) / self.imagefile_template.format(i)
+                               for i in batch_center_frame_idxs]
+                inputs = self._load_and_transform_data(query_paths)
+            else:
+                batch_frame_idxs, batch_frame_paths = self._prepare_frame_data(
+                    video, batch_center_frame_idxs, frames_per_clip)
+                inputs = self._load_and_transform_data(batch_frame_paths)
             search_vectors = self._calculate_search_vectors(inputs)
             faiss.normalize_L2(search_vectors)
 
 
-            distances, indices = search_past_captions(
-                index, file_names, search_vectors, batch_frame_idxs, self.num_neighbors
-            )
-
-            self._retrieve_captions(
-                indices,
-                batch_frame_idxs,
-                file_names,
-                video_name,
-                batch_center_frame_idxs,
-                video_captions_retrieved,
-            )
+            if self.paper_alignment:
+                self._retrieve_top_captions(index, file_names, search_vectors,
+                                            batch_center_frame_idxs, video_name,
+                                            video_captions_retrieved)
+            else:
+                _, indices = search_past_captions(
+                    index, file_names, search_vectors, batch_frame_idxs, self.num_neighbors
+                )
+                self._retrieve_captions(indices, batch_frame_idxs, file_names, video_name,
+                                        batch_center_frame_idxs, video_captions_retrieved)
 
         self._save_results(video_name, video_captions_retrieved)
+
+    def _retrieve_top_captions(self, index, file_names, search_vectors, centers,
+                               video_name, output):
+        cache = {}
+        for vector, center in zip(search_vectors, centers):
+            candidates = [i for i, name in enumerate(file_names)
+                          if name.split("/")[1] == video_name
+                          and center - 5 * self.frame_interval <= int(name.rsplit("/", 1)[1]) <= center]
+            if not candidates:
+                raise ValueError(f"No paper-alignment captions available at frame {center}")
+            scores = np.stack([index.reconstruct(i) for i in candidates]) @ vector
+            ranked_positions = np.argsort(-scores, kind="stable")[:10]
+            texts = []
+            for rank, position in enumerate(ranked_positions):
+                idx = candidates[position]
+                model_name, source_video, source_frame = file_names[idx].split("/")
+                key = (model_name, source_video)
+                if key not in cache:
+                    path = Path(self.captions_dir_template.format(model_name)) / f"{source_video}.json"
+                    cache[key] = json.loads(path.read_text())
+                texts.append(dict(text=cache[key][source_frame], model=model_name,
+                                  source_frame=int(source_frame), rank=rank + 1,
+                                  similarity=float(scores[position])))
+            output[str(center)] = texts
 
     def _load_faiss_index(self, video_name):
         index_file_path = Path(self.index_dir) / f"{video_name}.bin"
@@ -195,6 +228,7 @@ def run(
     job_id: int,
     resume: bool,
     pathname: str,
+    paper_alignment=False,
 ):
     model, device = initialize_vlm_model_and_device()
 
@@ -211,6 +245,7 @@ def run(
         imagefile_template,
         batch_size,
         frame_interval,
+        paper_alignment,
     )
 
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
@@ -233,6 +268,7 @@ def parse_args():
     parser.add_argument("--index_dir", type=str, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--pathname", type=str, default="*.json")
+    parser.add_argument("--paper_alignment", action="store_true")
     parser.add_argument("--imagefile_template", type=str, default="{:06d}.jpg")
     parser.add_argument("--fps", type=float, required=True)
     parser.add_argument("--clip_duration", type=float, default=10)
@@ -262,4 +298,5 @@ if __name__ == "__main__":
         job_id=args.job_id,
         resume=args.resume,
         pathname=args.pathname,
+        paper_alignment=args.paper_alignment,
     )

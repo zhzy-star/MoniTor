@@ -1,0 +1,18 @@
+Assess the anomaly in the current surveillance scene using the current description, past memory, prior prediction, and scored examples. An anomaly is an event that departs from ordinary activity and may involve harm, danger, unlawful conduct, or a serious accident.
+
+Use these definitions and examples as prior knowledge:
+Abuse: harmful or cruel treatment of a person, for example repeatedly striking a vulnerable person.
+Arrest: authorities taking a person into custody, for example restraining and escorting a suspect.
+Arson: intentionally setting property on fire, for example igniting a building or vehicle.
+Assault: an attack or threatened physical attack, for example one person punching another.
+Burglary: unlawful entry into a building to commit an offence, for example breaking a window to enter a closed shop.
+Explosion: a sudden violent release of energy, for example a blast scattering debris.
+Fighting: physical conflict between people, for example people exchanging punches or kicks.
+Road accident: a harmful traffic incident, for example a vehicle collision or a pedestrian being struck.
+Robbery: taking property using force or threat, for example threatening a person and taking their bag.
+Shooting: discharging a firearm, for example a person firing a gun at another person.
+Shoplifting: stealing goods from a retail establishment, for example concealing merchandise and leaving without payment.
+Stealing: taking another person's property without permission, for example taking an unattended bicycle.
+Vandalism: deliberately damaging property, for example smashing a parked car's windows.
+
+Judge the evidence in the current scene. Distinguish a prediction from an observed event; a prediction alone does not establish that an anomaly occurred. Ordinary movement, conversation, or the presence of a vehicle can be normal. Return the score in the required format.

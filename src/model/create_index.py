@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--frame_interval", type=int, default=16)
     parser.add_argument("--captions_dirs", nargs="+", required=True)
     parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--paper_alignment", action="store_true")
     return parser.parse_args()
 
 
@@ -50,12 +51,35 @@ def process_video(
     frame_interval: int,
     captions_dirs: List[str],
     output_dir: Path,
+    paper_alignment=False,
 ):
     video_name = Path(video.path).name
     index = init_faiss_index(index_dim)
     file_names = []
     video_captions = load_video_captions(captions_dirs, video_name)
 
+    if paper_alignment:
+        # Encode each text once, but retain every (time, model) occurrence.
+        unique_texts = list(dict.fromkeys(
+            text for frame in range(0, video.num_frames, frame_interval)
+            for text in video_captions[str(frame)].values()))
+        text_index = init_faiss_index(index_dim)
+        for start in range(0, len(unique_texts), batch_size):
+            update_faiss_index(model, device, text_index, unique_texts[start:start + batch_size])
+        text_ids = {text: i for i, text in enumerate(unique_texts)}
+        for frame in range(0, video.num_frames, frame_interval):
+            for model_name, text in video_captions[str(frame)].items():
+                index.add(text_index.reconstruct(text_ids[text]).reshape(1, -1))
+                file_names.append(f"{model_name}/{video_name}/{frame}")
+        save_results(index, file_names, output_dir, video_name)
+        (output_dir / f"{video_name}.paper.json").write_text(json.dumps({
+            "schema": "caption-occurrences-v1", "frame_interval": frame_interval,
+            "models": [Path(path).name for path in captions_dirs],
+        }, indent=2) + "\n")
+        return
+
+    marker = output_dir / f"{video_name}.paper.json"
+    marker.unlink(missing_ok=True)
     caption_to_frame_idxs = build_caption_to_frame_index(video_captions)
 
     for batch_start_frame in tqdm(
@@ -167,6 +191,7 @@ def main(
     frame_interval: int,
     captions_dirs: List[str],
     output_dir: str,
+    paper_alignment=False,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -184,6 +209,7 @@ def main(
             frame_interval,
             captions_dirs,
             output_dir,
+            paper_alignment,
         )
 
 
@@ -197,4 +223,5 @@ if __name__ == "__main__":
         args.frame_interval,
         args.captions_dirs,
         args.output_dir,
+        args.paper_alignment,
     )

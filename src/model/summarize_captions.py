@@ -43,6 +43,17 @@ def validate_summaries(result, frame_ids, complete=False):
 
 
 def caption_text(frame_captions, video_name, frame_idx):
+    if isinstance(frame_captions, list):
+        if not frame_captions:
+            raise ValueError(f"Empty paper captions at {video_name}/{frame_idx}")
+        for item in frame_captions:
+            if (not isinstance(item, dict) or not isinstance(item.get("source_frame"), int)
+                    or item["source_frame"] < 0 or item["source_frame"] > frame_idx
+                    or not isinstance(item.get("text"), str) or not item["text"].strip()):
+                raise ValueError("Invalid or future paper caption")
+        # Preserve all selected occurrences, ordered by source time then rank.
+        ordered = sorted(frame_captions, key=lambda item: (item["source_frame"], item["rank"]))
+        return "\n".join(item["text"] for item in ordered)
     if not isinstance(frame_captions, dict) or not frame_captions:
         raise ValueError(f"Expected nested cleaned captions at {video_name}/{frame_idx}")
     keys = sorted(frame_captions, key=int)

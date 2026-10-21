@@ -14,6 +14,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from src.data.video_record import VideoRecord
 from zhipuai import ZhipuAI
 from src.utils.path_utils import find_unprocessed_videos
+from src.model.memory_embeddings import load_vectors
 
 class GLMAnomalyScorer:
     def __init__(
@@ -28,6 +29,11 @@ class GLMAnomalyScorer:
         captions_dir,
         request_workers=3,
         prefetch_frames=1,
+        paper_alignment=False,
+        memory_embeddings_dir=None,
+        score_alpha=None,
+        score_previous="raw",
+        score_queue_source="raw",
     ):
         if batch_size != 1:
             raise ValueError("Online queue updates require batch_size=1")
@@ -35,6 +41,19 @@ class GLMAnomalyScorer:
             raise ValueError("request_workers must be a positive integer")
         if isinstance(prefetch_frames, bool) or not isinstance(prefetch_frames, int) or prefetch_frames not in (0, 1):
             raise ValueError("prefetch_frames must be 0 or 1")
+        if paper_alignment and not memory_embeddings_dir:
+            raise ValueError("paper_alignment requires memory_embeddings_dir")
+        self.paper_alignment = paper_alignment
+        self.memory_embeddings_dir = memory_embeddings_dir
+        self.score_alpha = (0.7 if paper_alignment else 0.6) if score_alpha is None else score_alpha
+        if not 0 <= self.score_alpha <= 1:
+            raise ValueError("score_alpha must be between 0 and 1")
+        if score_previous not in ("raw", "fused") or score_queue_source not in ("raw", "fused"):
+            raise ValueError("Score sources must be raw or fused")
+        self.score_previous = score_previous
+        self.score_queue_source = score_queue_source
+        self._memory_vectors = {}
+        self._memory_trace = {}
         self.api_key = api_key
         self.root_path = root_path
         self.batch_size = batch_size
@@ -136,6 +155,22 @@ class GLMAnomalyScorer:
         return similarity_score
 
     def _select_memories(self, captions, current_idx):
+        if self.paper_alignment:
+            current = self._memory_vectors[str(current_idx)]
+            candidates = []
+            long_memory = []
+            for idx in range(max(0, current_idx - 10 * self.frame_interval),
+                             current_idx, self.frame_interval):
+                similarity = float(np.dot(current, self._memory_vectors[str(idx)]))
+                keep = similarity > 0.5
+                candidates.append(dict(frame=idx, similarity=similarity, retained=keep))
+                if keep:
+                    long_memory.append(captions[str(idx)])
+            short_frames = list(range(max(0, current_idx - 2 * self.frame_interval),
+                                      current_idx, self.frame_interval))
+            self._memory_trace[str(current_idx)] = dict(long_candidates=candidates,
+                                                        short_frames=short_frames)
+            return long_memory, [captions[str(idx)] for idx in short_frames]
         # Prepare long-term memory (summarizing previous 5 seconds of descriptions)
         long_term_captions = [
             captions[str(i)] for i in range(max(0, current_idx - 5 * self.frame_interval), current_idx, self.frame_interval)
@@ -224,6 +259,9 @@ class GLMAnomalyScorer:
 
         current_caption = f"This is the description of the current frame: '{captions[str(idx)]}'."
         memory_info = f"Long-term memory contains a summary of events from the previous five seconds: {long_term_summary}. Short-term memory contains descriptions of the previous two frames: {short_term_summary}."
+        if self.paper_alignment:
+            memory_info = (f"Long-term memory summarizes retained events from the previous ten sampling steps: {long_term_summary}. "
+                           f"Short-term memory summarizes the previous two sampling steps in chronological order: {short_term_summary}.")
         scoring_prompt = (prompt + f"\n{memory_info}\nPrediction from the previous frame: '{prediction_result}'")
         return [
             {"role": "system", "content": scoring_prompt},
@@ -234,6 +272,11 @@ class GLMAnomalyScorer:
         video_scores = {}
         fy = {}
         frame_idxs = list(range(0, video.num_frames, self.frame_interval))
+        if self.paper_alignment:
+            self._memory_vectors = load_vectors(
+                Path(self.memory_embeddings_dir) / f"{Path(video.path).name}.npz", temporal_captions)
+            self._memory_trace = {}
+        previous_raw = None
 
         with self._preparation_executor() as executor:
             def prepare(frame_idx):
@@ -268,17 +311,35 @@ class GLMAnomalyScorer:
                 result_content = response.choices[0].message.content
                 current_score = self._parse_score(result_content)
                 previous_score = video_scores.get(str(frame_idx - self.frame_interval), None)
-                if current_score != -1 and previous_score is not None and previous_score != -1:
-                    score = round(0.6 * current_score + 0.4 * previous_score, 1)
+                if self.paper_alignment:
+                    reference = previous_raw if self.score_previous == "raw" else previous_score
+                    score = (self.score_alpha * current_score + (1 - self.score_alpha) * reference
+                             if current_score != -1 and reference is not None and reference != -1
+                             else float(current_score))
+                    queue_score = current_score if self.score_queue_source == "raw" else score
+                    if queue_score != -1:
+                        self._update_score_queue(frame_idx, round(queue_score, 1))
                 else:
-                    score = round(current_score, 1)
-
-                self._update_score_queue(frame_idx, score)  # Update score queue
+                    if current_score != -1 and previous_score is not None and previous_score != -1:
+                        score = round(self.score_alpha * current_score + (1 - self.score_alpha) * previous_score, 1)
+                    else:
+                        score = round(current_score, 1)
+                    self._update_score_queue(frame_idx, score)
+                previous_raw = current_score
 
                 fy[str(frame_idx)] = {'new_score': score, 'raw_score': result_content, 'caption': dialog[1]["content"], 'prompt': dialog[0]["content"]}
+                if self.paper_alignment:
+                    fy[str(frame_idx)].update(
+                        parsed_score=current_score, alpha=self.score_alpha,
+                        previous_source=self.score_previous, previous_score=reference,
+                        queue_source=self.score_queue_source,
+                        memory=self._memory_trace[str(frame_idx)])
                 video_scores[str(frame_idx)] = score
                 if not self.prefetch_frames and next_idx is not None:
                     prepared = prepare(next_idx)
+
+        if self.paper_alignment:
+            return fy  # No forward-looking smooth_score in the paper path.
 
         # Smoothing scores
         sorted_indices = sorted(video_scores.keys(), key=lambda x: int(x))
@@ -337,6 +398,11 @@ def run(
     resume=False,
     request_workers=3,
     prefetch_frames=1,
+    paper_alignment=False,
+    memory_embeddings_dir=None,
+    score_alpha=None,
+    score_previous="raw",
+    score_queue_source="raw",
 ):
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
     if resume:
@@ -353,6 +419,11 @@ def run(
         "captions_dir": captions_dir,
         "request_workers": request_workers,
         "prefetch_frames": prefetch_frames,
+        "paper_alignment": paper_alignment,
+        "memory_embeddings_dir": memory_embeddings_dir,
+        "score_alpha": score_alpha,
+        "score_previous": score_previous,
+        "score_queue_source": score_queue_source,
     }
 
     with ProcessPoolExecutor(max_workers=num_jobs) as executor:
@@ -374,6 +445,11 @@ def parse_args():
                         help="Preparation requests per video; scoring uses one additional client")
     parser.add_argument("--prefetch_frames", type=int, choices=(0, 1), default=1,
                         help="Prepare the next frame while scoring the current frame")
+    parser.add_argument("--paper_alignment", action="store_true")
+    parser.add_argument("--memory_embeddings_dir")
+    parser.add_argument("--score_alpha", type=float)
+    parser.add_argument("--score_previous", choices=("raw", "fused"), default="raw")
+    parser.add_argument("--score_queue_source", choices=("raw", "fused"), default="raw")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     if not args.api_key:
@@ -400,4 +476,9 @@ if __name__ == "__main__":
         resume=args.resume,
         request_workers=args.request_workers,
         prefetch_frames=args.prefetch_frames,
+        paper_alignment=args.paper_alignment,
+        memory_embeddings_dir=args.memory_embeddings_dir,
+        score_alpha=args.score_alpha,
+        score_previous=args.score_previous,
+        score_queue_source=args.score_queue_source,
     )
