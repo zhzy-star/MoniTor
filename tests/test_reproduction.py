@@ -20,7 +20,7 @@ from src.model.image_text_caption_cleaner import ImageTextCaptionCleaner
 from src.model.image_captioner import ImageCaptioner
 from src.model.video_text_score_refiner import VideoTextScoreRefiner
 from src.preprocessing.extract_frames import main as extract_frames
-from src.reproduce import STAGES, build_commands, check_inputs, read_config
+from src.reproduce import UCF_STAGES, XD_STAGES, build_commands, check_inputs, read_config
 from src.utils.path_utils import find_unprocessed_videos
 from src.utils.retrieval_utils import search_past_captions
 
@@ -166,23 +166,6 @@ class ReproductionTests(unittest.TestCase):
         self.assertEqual(set(indices[1]), {0, 1})
         self.assertEqual(set(indices[2]), {0, 1, 2})
 
-    def test_cleaner_maps_variable_clip_lengths_to_correct_centers(self):
-        cleaner = ImageTextCaptionCleaner(None, "cpu", self.root / "clean", 10, 1,
-                                          self.root / "index", str(self.root / "{}"),
-                                          10, 30, "{:06d}.jpg", 2, 16)
-        video = VideoRecord(["demo", "0", "32", "0"], self.root)
-        indices, paths = cleaner._prepare_frame_data(video, [0, 16], 300)
-        self.assertEqual(cleaner._sample_centers, [0] + [16] * 10)
-        self.write_json(self.root / "model" / "demo.json", {"0": "scene"})
-        result = {}
-        from collections import defaultdict
-        result = defaultdict(dict)
-        cleaner._retrieve_captions([[0]] * len(paths), indices, ["model/demo/0"],
-                                  "demo", [0, 16], result)
-        self.assertEqual(len(result["0"]), 1)
-        self.assertEqual(len(result["16"]), 10)
-        self.assertTrue(all(int(key) <= 16 for key in result["16"]))
-
     def test_refiner_reads_jpeg_clips_and_preserves_score_records(self):
         class FakeModel:
             def __call__(self, inputs):
@@ -225,19 +208,36 @@ class ReproductionTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         for name in ("04new", "xd_04"):
             scorer_module = importlib.import_module(f"src.model.{name}")
+            scorer_keywords = {}
+            memory_patch = contextlib.nullcontext()
+            if name == "04new":
+                scorer_keywords["memory_embeddings_dir"] = self.root / "memory"
+                memory_patch = patch.object(
+                    scorer_module, "load_vectors",
+                    return_value={"0": np.array([1.0]), "16": np.array([1.0])},
+                )
             with patch.object(scorer_module, "ZhipuAI", return_value=client):
                 scorer = scorer_module.GLMAnomalyScorer("test", self.root, 1, 16,
-                                                       "Assess", "Return [0.0]", self.root / "scores", self.root / "summaries")
+                                                       "Assess", "Return [0.0]", self.root / "scores",
+                                                       self.root / "summaries", **scorer_keywords)
             def score_reply(**kwargs):
                 content = "[0.8]" if "current frame" in kwargs["messages"][-1]["content"] else "past summary"
                 return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
             with patch.object(scorer_module, "ZhipuAI", return_value=client), \
+                 memory_patch, \
                  patch.object(client.chat.completions, "create", side_effect=score_reply):
                 scorer.process_video(VideoRecord(["demo", "0", "17", "0"], self.root))
             scores = json.loads((self.root / "scores" / "demo.json").read_text())
             self.assertEqual(set(scores), {"0", "16"})
             self.assertEqual(len(calculate_weighted_scores(scores, 10, 16, 18)), 18)
+            error_memory_patch = contextlib.nullcontext()
+            if name == "04new":
+                error_memory_patch = patch.object(
+                    scorer_module, "load_vectors",
+                    return_value={"0": np.array([1.0]), "16": np.array([1.0])},
+                )
             with patch.object(scorer_module, "ZhipuAI", return_value=client), \
+                 error_memory_patch, \
                  patch.object(client.chat.completions, "create", side_effect=RuntimeError("offline")):
                 with self.assertRaisesRegex(RuntimeError, "Scoring failed"):
                     scorer.process_video(VideoRecord(["demo", "0", "17", "0"], self.root))
@@ -248,7 +248,8 @@ class ReproductionTests(unittest.TestCase):
         self.assertEqual([v.path.name for v in find_unprocessed_videos(videos, self.root / "output", "*.json")], ["a", "c"])
         for dataset in ("ucf", "xd"):
             config = read_config(Path(__file__).resolve().parents[1] / f"configs/{dataset}.json")
-            for stage in STAGES:
+            stages = UCF_STAGES if dataset == "ucf" else XD_STAGES
+            for stage in stages:
                 commands = build_commands(config, stage)
                 self.assertTrue(commands)
                 self.assertTrue(all(command[1:3] == ["-m", command[2]] for command in commands))

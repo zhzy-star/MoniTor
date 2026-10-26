@@ -16,7 +16,7 @@ def main():
     info["scope"] = "single-video pipeline test with one BLIP model; not paper-level evaluation"
     info["caption_models"] = config["caption_models"]
     info["stages"] = []
-    for stage in ("caption-index", "clean", "summarize", "score", "summary-index", "refine"):
+    for stage in ("caption-index", "clean", "summarize", "memory-embeddings", "score"):
         start = time.monotonic()
         print(f"START {stage}", flush=True)
         record = {"stage": stage}
@@ -34,16 +34,15 @@ def main():
         info["stages"].append(record)
         (run_dir / "run_info.json").write_text(json.dumps(info, indent=2)+"\n")
         print(f"DONE {stage}: {record['seconds']} s", flush=True)
-    for source in ("raw", "refined"):
-        print(f"START evaluate/{source}", flush=True)
-        with (run_dir / f"evaluate_{source}.log").open("w") as log:
-            result = subprocess.run(build_commands(config, "evaluate", source)[0], cwd=ROOT,
-                                    stdout=log, stderr=subprocess.STDOUT)
-        if result.returncode:
-            print(f"FAILED evaluate/{source}", flush=True)
-            return result.returncode
-        metrics_path = Path(config["output_dir"]) / source / "metrics.json"
-        print(f"METRICS {source} {metrics_path.read_text().strip()}", flush=True)
+    print("START evaluate/raw", flush=True)
+    with (run_dir / "evaluate_raw.log").open("w") as log:
+        result = subprocess.run(build_commands(config, "evaluate", "raw")[0], cwd=ROOT,
+                                stdout=log, stderr=subprocess.STDOUT)
+    if result.returncode:
+        print("FAILED evaluate/raw", flush=True)
+        return result.returncode
+    metrics_path = Path(config["output_dir"]) / "raw" / "metrics.json"
+    print(f"METRICS raw {metrics_path.read_text().strip()}", flush=True)
     print(f"COMPLETE {run_dir}", flush=True)
     return 0
 

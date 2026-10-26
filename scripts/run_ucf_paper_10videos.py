@@ -1,4 +1,4 @@
-"""Prepare an isolated paper-alignment run from the previous ten-video captions.
+"""Prepare an isolated reference-implementation run from ten-video captions.
 
 Preparation is the default. --run explicitly starts inference/API stages.
 The anomaly prior is a reconstruction; its exact text was not disclosed in the paper.
@@ -43,9 +43,8 @@ def prepare(source):
     for key, suffix in {
         "raw_caption_root": "caption/raw", "caption_index_dir": "index/captions",
         "clean_captions_dir": "caption/clean", "summaries_dir": "caption/summary",
-        "memory_embeddings_dir": "index/memory", "summary_index_dir": "index/summaries",
-        "raw_scores_dir": "score/raw", "refined_scores_dir": "score/refined",
-        "retrieval_dir": "retrieval", "output_dir": "output",
+        "memory_embeddings_dir": "index/memory", "raw_scores_dir": "score/raw",
+        "output_dir": "output",
     }.items():
         config[key] = str(run_dir / suffix)
     # Copy small JSON files; preserve original BLIP outputs and existing experiments.
@@ -57,7 +56,7 @@ def prepare(source):
     (run_dir / "videos.txt").write_text("\n".join(v.path.name + ".mp4" for v in videos) + "\n")
     config.update(annotationfile_path=str(run_dir / "test.txt"),
                   video_split_file=str(run_dir / "videos.txt"),
-                  temporal_annotation_file=str(clipped), paper_alignment=True,
+                  temporal_annotation_file=str(clipped),
                   score_alpha=0.7, score_previous="raw", score_queue_source="raw")
     (run_dir / "prompts").mkdir()
     for key, source_path in {
@@ -68,7 +67,7 @@ def prepare(source):
         target = run_dir / "prompts" / source_path.name
         shutil.copyfile(source_path, target)
         config[key] = str(target)
-    config["paper_alignment_notes"] = {
+    config["reference_notes"] = {
         "anomaly_prior": "Reconstructed definitions/examples, not verbatim paper prompts",
         "fusion": "Literal formula: current raw and previous raw; queue uses raw scores",
         "target": "Main empty-initialization setting; ten-video diagnostic only",

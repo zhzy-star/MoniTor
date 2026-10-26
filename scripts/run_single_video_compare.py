@@ -109,12 +109,11 @@ def main():
     shutil.copy2(src, dst)
 
     for label, config in (("1model", single), ("5models", five)):
-        for name in ("caption-index", "clean", "summarize", "score", "summary-index", "refine"):
+        for name in ("caption-index", "clean", "summarize", "memory-embeddings", "score"):
             stage(config, name, f"{label}_{name}")
-        for source in ("raw", "refined"):
-            stage(config, "evaluate", f"{label}_evaluate_{source}", source)
-            metrics = json.loads((Path(config["output_dir"]) / source / "metrics.json").read_text())
-            print(f"METRICS {label}/{source}: {json.dumps(metrics)}", flush=True)
+        stage(config, "evaluate", f"{label}_evaluate_raw", "raw")
+        metrics = json.loads((Path(config["output_dir"]) / "raw" / "metrics.json").read_text())
+        print(f"METRICS {label}/raw: {json.dumps(metrics)}", flush=True)
     print(f"COMPLETE; report: {info_path}", flush=True)
     return 0
 

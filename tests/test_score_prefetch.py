@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from src.reproduce import build_commands, read_config
 
 scoring = importlib.import_module("src.model.04new")
@@ -97,11 +99,15 @@ class ScorePrefetchTests(unittest.TestCase):
         self.addCleanup(self.network.stop)
 
     def run_scorer(self, api, workers=3, prefetch=1, captions=None, save=False):
+        frame_captions = self.captions if captions is None else captions
+        memory_vectors = {frame: np.array([1.0]) for frame in frame_captions}
         with patch.object(scoring, "ZhipuAI", side_effect=api.client), \
+             patch.object(scoring, "load_vectors", return_value=memory_vectors), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             scorer = scoring.GLMAnomalyScorer("offline", self.root, 1, 16,
                                              "Assess", "Return [0.0]", self.root / "scores", self.root,
-                                             request_workers=workers, prefetch_frames=prefetch)
+                                             request_workers=workers, prefetch_frames=prefetch,
+                                             memory_embeddings_dir=self.root / "memory")
             try:
                 if save:
                     (self.root / "demo.json").write_text(json.dumps(self.captions))
@@ -129,9 +135,13 @@ class ScorePrefetchTests(unittest.TestCase):
                                  Counter(json.dumps(c, sort_keys=True) for c in serial_api.calls))
                 self.assertEqual(len(api.calls), 25)  # 1 + 6 * 4, including duplicate-input summaries.
                 self.assertTrue(all(client.closed for client in api.clients))
-        self.assertEqual([row["new_score"] for row in expected.values()], [0.2, 0.6, -1, 0.7, 0.5, 0.3, 0.6])
-        self.assertIn("Event with score 0.6: 'scene1 distinctive action1'.", expected["32"]["prompt"])
-        self.assertIn("Short-term memory contains descriptions of the previous two frames: summary: scene1 distinctive action1 scene0 distinctive action0.", expected["32"]["prompt"])
+        for actual_score, expected_score in zip(
+            [row["new_score"] for row in expected.values()],
+            [0.2, 0.69, -1, 0.7, 0.49, 0.19, 0.59],
+        ):
+            self.assertAlmostEqual(actual_score, expected_score)
+        self.assertIn("Event with score 0.9: 'scene1 distinctive action1'.", expected["32"]["prompt"])
+        self.assertIn("Short-term memory summarizes the previous two sampling steps in chronological order: summary: scene0 distinctive action0 scene1 distinctive action1.", expected["32"]["prompt"])
         self.assertNotIn("Event with score", expected["0"]["prompt"])
         self.assertEqual(serial_api.peak, 1)
 

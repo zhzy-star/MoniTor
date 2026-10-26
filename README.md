@@ -105,6 +105,9 @@ the Python executable with `PYTHON` and the JSON config with `UCF_CONFIG`.
 The UCF config enables automatic GPU/CPU layer placement with a `20GiB` GPU
 weight budget for each BLIP model. This allows larger models to use CPU RAM;
 CPU offloading can substantially slow the XXL model.
+The UCF pipeline directly follows the reference setup: Top-10 caption cleaning,
+10-step ImageBind memory gating, `alpha=0.7`, raw-score queue updates, and no
+post-hoc score refinement or three-sample smoothing.
 
 Run an individual stage range, or continue after a completed stage:
 
@@ -114,7 +117,7 @@ bash scripts/run_ucf_all.sh caption evaluate
 bash scripts/run_ucf_all.sh score evaluate
 ```
 
-Caption, cleaning, summary, score, and refinement stages skip videos with
+Caption, cleaning, summary, memory-embedding, and score stages skip videos with
 existing output JSON files. Index stages rebuild their indexes. Extraction
 refuses to overwrite an existing generated video list, so start at `caption`
 after extraction has completed. If prompts or upstream artifacts change,
@@ -185,11 +188,9 @@ videos. To restore serial request scheduling, set `score_request_workers` to 1 a
 
 ```bash
 bash scripts/reproduce.sh --config configs/ucf.json --stage summarize --resume
+bash scripts/reproduce.sh --config configs/ucf.json --stage memory-embeddings --resume
 bash scripts/reproduce.sh --config configs/ucf.json --stage score
-bash scripts/reproduce.sh --config configs/ucf.json --stage summary-index
-bash scripts/reproduce.sh --config configs/ucf.json --stage refine --resume
 bash scripts/reproduce.sh --config configs/ucf.json --stage evaluate --score-source raw
-bash scripts/reproduce.sh --config configs/ucf.json --stage evaluate --score-source refined
 ```
 
 `--check` validates stage inputs without loading model weights or calling an
@@ -197,7 +198,7 @@ API. Extraction preserves the official test split order and writes each source
 frame once. It refuses to overwrite an existing generated video list.
 Caption JSON files are named `<video_name>.json` with source frame keys
 `"0"`, `"16"`, `"32"`, etc. Evaluation writes metrics and aligned frame arrays
-under `output/ucf/raw` or `output/ucf/refined`.
+under `output/ucf/raw`.
 
 The original checkout omitted the summary conversion stage and complete prompt
 files. `src/model/summarize_captions.py` and `prompts/` supply reviewable defaults;

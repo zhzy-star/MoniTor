@@ -1,13 +1,11 @@
 import argparse
 import json
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import List
 
 import faiss
 import torch
-from tqdm import tqdm
 
 from imagebind import data
 from imagebind.models.imagebind_model import ModalityType
@@ -32,7 +30,6 @@ def parse_args():
     parser.add_argument("--frame_interval", type=int, default=16)
     parser.add_argument("--captions_dirs", nargs="+", required=True)
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--paper_alignment", action="store_true")
     return parser.parse_args()
 
 
@@ -51,57 +48,24 @@ def process_video(
     frame_interval: int,
     captions_dirs: List[str],
     output_dir: Path,
-    paper_alignment=False,
 ):
     video_name = Path(video.path).name
     index = init_faiss_index(index_dim)
     file_names = []
     video_captions = load_video_captions(captions_dirs, video_name)
 
-    if paper_alignment:
-        # Encode each text once, but retain every (time, model) occurrence.
-        unique_texts = list(dict.fromkeys(
-            text for frame in range(0, video.num_frames, frame_interval)
-            for text in video_captions[str(frame)].values()))
-        text_index = init_faiss_index(index_dim)
-        for start in range(0, len(unique_texts), batch_size):
-            update_faiss_index(model, device, text_index, unique_texts[start:start + batch_size])
-        text_ids = {text: i for i, text in enumerate(unique_texts)}
-        for frame in range(0, video.num_frames, frame_interval):
-            for model_name, text in video_captions[str(frame)].items():
-                index.add(text_index.reconstruct(text_ids[text]).reshape(1, -1))
-                file_names.append(f"{model_name}/{video_name}/{frame}")
-        save_results(index, file_names, output_dir, video_name)
-        (output_dir / f"{video_name}.paper.json").write_text(json.dumps({
-            "schema": "caption-occurrences-v1", "frame_interval": frame_interval,
-            "models": [Path(path).name for path in captions_dirs],
-        }, indent=2) + "\n")
-        return
-
-    marker = output_dir / f"{video_name}.paper.json"
-    marker.unlink(missing_ok=True)
-    caption_to_frame_idxs = build_caption_to_frame_index(video_captions)
-
-    for batch_start_frame in tqdm(
-        range(0, video.num_frames, batch_size * frame_interval),
-        desc=f"Processing {video.path}",
-        unit="batch",
-    ):
-        batch_end_frame = min(batch_start_frame + (batch_size * frame_interval), video.num_frames)
-        batch_frame_idxs = range(batch_start_frame, batch_end_frame, frame_interval)
-
-        text_list = extract_text_list(
-            video_captions, caption_to_frame_idxs, batch_frame_idxs, frame_interval
-        )
-
-        if text_list:
-            index = update_faiss_index(model, device, index, text_list)
-            file_names.extend(
-                build_file_names(
-                    video_captions, caption_to_frame_idxs, text_list, video_name, frame_interval
-                )
-            )
-
+    # Encode each text once, but retain every (time, model) occurrence.
+    unique_texts = list(dict.fromkeys(
+        text for frame in range(0, video.num_frames, frame_interval)
+        for text in video_captions[str(frame)].values()))
+    text_index = init_faiss_index(index_dim)
+    for start in range(0, len(unique_texts), batch_size):
+        update_faiss_index(model, device, text_index, unique_texts[start:start + batch_size])
+    text_ids = {text: i for i, text in enumerate(unique_texts)}
+    for frame in range(0, video.num_frames, frame_interval):
+        for model_name, text in video_captions[str(frame)].items():
+            index.add(text_index.reconstruct(text_ids[text]).reshape(1, -1))
+            file_names.append(f"{model_name}/{video_name}/{frame}")
     save_results(index, file_names, output_dir, video_name)
 
 
@@ -128,30 +92,6 @@ def load_video_captions(captions_dirs: List[str], video_name: str):
     return video_captions
 
 
-def build_caption_to_frame_index(video_captions):
-    caption_to_frame_idxs = defaultdict(list)
-    for frame_idx, cap_model_name_to_caption in video_captions.items():
-        frame_unique_captions = set(cap_model_name_to_caption.values())
-        for caption in frame_unique_captions:
-            caption_to_frame_idxs[caption].append(int(frame_idx))
-
-    return caption_to_frame_idxs
-
-
-def extract_text_list(video_captions, caption_to_frame_idxs, batch_frame_idxs, frame_interval):
-    text_list = []
-    for frame_idx in batch_frame_idxs:
-        frame_unique_captions = set(video_captions[str(frame_idx)].values())
-        unique_captions = [
-            caption
-            for caption in frame_unique_captions
-            if int(frame_idx)
-            == min(filter(lambda x: x % frame_interval == 0, caption_to_frame_idxs[caption]))
-        ]
-        text_list.extend(unique_captions)
-    return text_list
-
-
 def update_faiss_index(model, device, index, text_list):
     inputs = {ModalityType.TEXT: data.load_and_transform_text(text_list, device)}
 
@@ -162,17 +102,6 @@ def update_faiss_index(model, device, index, text_list):
         index.add(index_vectors)
 
     return index
-
-
-def build_file_names(video_captions, caption_to_frame_idxs, text_list, video_name, frame_interval):
-    file_names = []
-    for caption in text_list:
-        frame_idx = min(filter(lambda x: x % frame_interval == 0, caption_to_frame_idxs[caption]))
-        cap_model_name_idx = list(video_captions[str(frame_idx)].values()).index(caption)
-        cap_model_name = list(video_captions[str(frame_idx)].keys())[cap_model_name_idx]
-        file_names.append(f"{cap_model_name}/{video_name}/{frame_idx}")
-
-    return file_names
 
 
 def save_results(index, file_names, output_dir, video_name):
@@ -191,7 +120,6 @@ def main(
     frame_interval: int,
     captions_dirs: List[str],
     output_dir: str,
-    paper_alignment=False,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +137,6 @@ def main(
             frame_interval,
             captions_dirs,
             output_dir,
-            paper_alignment,
         )
 
 
@@ -223,5 +150,4 @@ if __name__ == "__main__":
         args.frame_interval,
         args.captions_dirs,
         args.output_dir,
-        args.paper_alignment,
     )

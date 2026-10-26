@@ -1,4 +1,4 @@
-"""Offline regression checks for the paper-alignment path.
+"""Offline regression checks for the UCF reference scoring path.
 
 These tests use synthetic vectors and mocked API replies.  They must not load
 ImageBind, contact the network, decode video, or run the ten-video experiment.
@@ -92,7 +92,7 @@ class PaperAlignmentTests(unittest.TestCase):
         with patch.object(scoring, "ZhipuAI", return_value=client):
             scorer = scoring.GLMAnomalyScorer("offline", ".", 1, 16, "context", "format", ".", ".",
                                               request_workers=1, prefetch_frames=0,
-                                              paper_alignment=True, memory_embeddings_dir=".")
+                                              memory_embeddings_dir=".")
         captions = {str(i * 16): f"caption-{i}" for i in range(11)}
         vectors = {str(i * 16): np.array([1.0, 0.0], dtype=np.float32) for i in range(11)}
         vectors["0"] = np.array([0.0, 1.0], dtype=np.float32)
@@ -113,7 +113,7 @@ class PaperAlignmentTests(unittest.TestCase):
              patch.object(scoring, "load_vectors", return_value={str(i): np.array([1.0]) for i in (0, 16, 32)}):
             scorer = scoring.GLMAnomalyScorer("offline", ".", 1, 16, "context", "format", ".", ".",
                                               request_workers=1, prefetch_frames=0,
-                                              paper_alignment=True, memory_embeddings_dir=".")
+                                              memory_embeddings_dir=".")
             video = SimpleNamespace(num_frames=33, path=Path("demo"))
             result = scorer._score_temporal_summaries(video, {"0": "first", "16": "second", "32": "third"})
         self.assertEqual(result["0"]["new_score"], 0.2)
@@ -160,17 +160,22 @@ class PaperAlignmentTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_vectors(path, captions)
 
-    def test_paper_entry_flags_and_legacy_default(self):
+    def test_reference_path_is_the_ucf_default(self):
         root = Path(__file__).resolve().parents[1]
-        legacy = read_config(root / "configs/ucf.json")
-        self.assertNotIn("--paper_alignment", build_commands(legacy, "score")[0])
-        paper = dict(legacy, paper_alignment=True, memory_embeddings_dir="/tmp/offline-vectors",
-                     score_alpha=0.7, score_previous="raw", score_queue_source="raw")
+        config = read_config(root / "configs/ucf.json")
+        self.assertNotIn("paper_alignment", config)
+        self.assertEqual(config["score_alpha"], 0.7)
+        self.assertEqual(config["score_previous"], "raw")
+        self.assertEqual(config["score_queue_source"], "raw")
         for stage in ("caption-index", "clean", "score"):
-            self.assertIn("--paper_alignment", build_commands(paper, stage)[0])
-        command = build_commands(paper, "memory-embeddings")[0]
+            self.assertNotIn("--paper_alignment", build_commands(config, stage)[0])
+        command = build_commands(config, "memory-embeddings")[0]
         self.assertIn("src.model.memory_embeddings", command)
-        self.assertEqual(command[command.index("--output_dir") + 1], paper["memory_embeddings_dir"])
+        self.assertEqual(command[command.index("--output_dir") + 1], config["memory_embeddings_dir"])
+        with self.assertRaisesRegex(ValueError, "UCF reference pipeline"):
+            build_commands(config, "refine")
+        with self.assertRaisesRegex(ValueError, "raw final scores"):
+            build_commands(config, "evaluate", "refined")
 
 
 if __name__ == "__main__":

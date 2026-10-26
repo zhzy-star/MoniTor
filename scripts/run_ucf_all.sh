@@ -7,13 +7,7 @@ start_stage="${1:-extract}"
 end_stage="${2:-evaluate}"
 test_config="${UCF_CONFIG:-configs/ucf.json}"
 test_python="${PYTHON:-/root/miniconda3/envs/Moni/bin/python}"
-stages=(extract caption caption-index clean summarize score summary-index refine evaluate)
-# Paper mode evaluates the fused score directly; ImageBind summary vectors
-# are prepared before score workers start. No extra retrieval refinement.
-paper_mode=$("$test_python" -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("paper_alignment", False)))' "$test_config")
-if [[ "$paper_mode" == 1 ]]; then
-    stages=(extract caption caption-index clean summarize memory-embeddings score evaluate)
-fi
+stages=(extract caption caption-index clean summarize memory-embeddings score evaluate)
 start_index=-1
 end_index=-1
 for index in "${!stages[@]}"; do
@@ -40,12 +34,8 @@ for (( index=start_index; index<=end_index; index++ )); do
     stage="${stages[$index]}"
     echo "Running $stage; logs: $test_logs"
     if [[ "$stage" == evaluate ]]; then
-        score_sources=(raw refined)
-        [[ "$paper_mode" != 1 ]] || score_sources=(raw)
-        for source in "${score_sources[@]}"; do
-            "$test_python" -u -m src.reproduce --config "$test_config" \
-                --stage evaluate --score-source "$source" 2>&1 | tee "$test_logs/evaluate_$source.log"
-        done
+        "$test_python" -u -m src.reproduce --config "$test_config" \
+            --stage evaluate --score-source raw 2>&1 | tee "$test_logs/evaluate_raw.log"
     else
         "$test_python" -u -m src.reproduce --config "$test_config" \
             --stage "$stage" --resume 2>&1 | tee "$test_logs/$stage.log"

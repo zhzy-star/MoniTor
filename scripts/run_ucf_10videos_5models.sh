@@ -50,8 +50,8 @@ config["video_split_file"] = str(split_path)
 outputs = {
     "raw_caption_root": "caption/raw", "caption_index_dir": "index/captions",
     "clean_captions_dir": "caption/clean", "summaries_dir": "caption/summary",
-    "summary_index_dir": "index/summaries", "raw_scores_dir": "score/raw",
-    "refined_scores_dir": "score/refined", "retrieval_dir": "retrieval",
+    "memory_embeddings_dir": "index/memory",
+    "raw_scores_dir": "score/raw",
     "output_dir": "output",
 }
 for key, suffix in outputs.items():
@@ -116,5 +116,4 @@ PY
 # One joint analysis after every model has finished, then both evaluations.
 bash scripts/run_ucf_all.sh caption-index evaluate \
     2>&1 | tee "$monitor_run_dir/logs/analysis.log"
-printf '完成。原始指标：%s/output/raw/metrics.json\n' "$monitor_run_dir"
-printf '细化指标：%s/output/refined/metrics.json\n' "$monitor_run_dir"
+printf '完成。指标：%s/output/raw/metrics.json\n' "$monitor_run_dir"
