@@ -33,8 +33,14 @@ mkdir -p "$test_logs"
 for (( index=start_index; index<=end_index; index++ )); do
     stage="${stages[$index]}"
     echo "Running $stage; logs: $test_logs"
+    stage_prefix=()
+    if [[ "$stage" == memory-embeddings && -n "${UCF_MEMORY_LOCK:-}" ]]; then
+        mkdir -p "$(dirname "$UCF_MEMORY_LOCK")"
+        stage_prefix=(flock "$UCF_MEMORY_LOCK")
+        echo "Waiting for optional ImageBind lock: $UCF_MEMORY_LOCK"
+    fi
     if [[ "$stage" == evaluate ]]; then
-        "$test_python" -u -m src.reproduce --config "$test_config" \
+        "${stage_prefix[@]}" "$test_python" -u -m src.reproduce --config "$test_config" \
             --stage evaluate --score-source raw 2>&1 | tee "$test_logs/evaluate_raw.log"
     else
         "$test_python" -u -m src.reproduce --config "$test_config" \

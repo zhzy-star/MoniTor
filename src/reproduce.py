@@ -39,6 +39,9 @@ def read_config(path):
     if config["dataset"] == "ucf" and not config.get("memory_embeddings_dir"):
         raise ValueError("ucf requires memory_embeddings_dir")
     models = config.get("caption_models", [])
+    for key in ("summary_model", "score_model"):
+        if key in config and (not isinstance(config[key], str) or not config[key].strip()):
+            raise ValueError(f"{key} must be a nonempty string")
     for key in ("summary_workers", "score_workers", "score_request_workers"):
         workers = config.get(key, 1)
         if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
@@ -98,6 +101,7 @@ def build_commands(config, stage, score_source="raw", resume=False):
                         annotationfile_path=c["annotationfile_path"], frame_interval=c["frame_interval"],
                         captions_dir=c["clean_captions_dir"], output_dir=c["summaries_dir"],
                         prompt_file=c["summary_prompt_file"], resume=resume,
+                        model=c.get("summary_model", "glm-4-flash"),
                         workers=c.get("summary_workers", 1))]
     if stage == "memory-embeddings":
         return [command("src.model.memory_embeddings", **shared,
@@ -112,6 +116,7 @@ def build_commands(config, stage, score_source="raw", resume=False):
         return [command("src.model.04new" if c["dataset"] == "ucf" else "src.model.xd_04",
                         **dict(shared, batch_size=1), captions_dir=c["summaries_dir"],
                         output_scores_dir=c["raw_scores_dir"],
+                        model=c.get("score_model", "glm-4-flash") if c["dataset"] == "ucf" else None,
                         num_jobs=c.get("score_workers", 1) if c["dataset"] == "ucf" else None,
                         request_workers=c.get("score_request_workers", 3) if c["dataset"] == "ucf" else None,
                         prefetch_frames=c.get("score_prefetch_frames", 1) if c["dataset"] == "ucf" else None,

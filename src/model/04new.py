@@ -31,6 +31,7 @@ class GLMAnomalyScorer:
         score_alpha=None,
         score_previous="raw",
         score_queue_source="raw",
+        model="glm-4-flash",
     ):
         if batch_size != 1:
             raise ValueError("Online queue updates require batch_size=1")
@@ -48,6 +49,9 @@ class GLMAnomalyScorer:
             raise ValueError("Score sources must be raw or fused")
         self.score_previous = score_previous
         self.score_queue_source = score_queue_source
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a nonempty string")
+        self.model = model
         self._memory_vectors = {}
         self._memory_trace = {}
         self.api_key = api_key
@@ -125,7 +129,7 @@ class GLMAnomalyScorer:
         # Simulate LSTM-based summarization by combining texts into a summary
         combined_text = " ".join(texts)
         summary = (client if client is not None else self.client).chat.completions.create(
-            model="glm-4-flash",
+            model=self.model,
             messages=[
                 {"role": "system", "content": "Please summarize the following descriptions into a concise sentence."}, # modify to your summary prompt
                 {"role": "user", "content": combined_text}
@@ -159,7 +163,7 @@ class GLMAnomalyScorer:
                              "Please provide a concise prediction based on the current context.\n"
                              "Please provide the prediction in a concise sentence, focusing on describing the behavior or event that might occur next in the scene, avoiding any additional explanations.")
         response = (client if client is not None else self.client).chat.completions.create(
-            model="glm-4-flash",
+            model=self.model,
             messages=[
                 {"role": "system", "content": prediction_prompt},
                 {"role": "user", "content": f"The description of the previous frame is: '{previous_caption}', please provide the description of the next frame."}
@@ -253,7 +257,7 @@ class GLMAnomalyScorer:
                     prepared = prepare(next_idx)
                 try:
                     response = self.client.chat.completions.create(
-                        model="glm-4-flash",
+                        model=self.model,
                         messages=dialog,
                         stream=False,
                         timeout=60,  # Increase timeout
@@ -333,6 +337,7 @@ def run(
     score_alpha=None,
     score_previous="raw",
     score_queue_source="raw",
+    model="glm-4-flash",
 ):
     video_list = [VideoRecord(x.strip().split(), root_path) for x in open(annotationfile_path)]
     if resume:
@@ -353,6 +358,7 @@ def run(
         "score_alpha": score_alpha,
         "score_previous": score_previous,
         "score_queue_source": score_queue_source,
+        "model": model,
     }
 
     with ProcessPoolExecutor(max_workers=num_jobs) as executor:
@@ -378,6 +384,7 @@ def parse_args():
     parser.add_argument("--score_alpha", type=float)
     parser.add_argument("--score_previous", choices=("raw", "fused"), default="raw")
     parser.add_argument("--score_queue_source", choices=("raw", "fused"), default="raw")
+    parser.add_argument("--model", default="glm-4-flash")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     if not args.api_key:
@@ -408,4 +415,5 @@ if __name__ == "__main__":
         score_alpha=args.score_alpha,
         score_previous=args.score_previous,
         score_queue_source=args.score_queue_source,
+        model=args.model,
     )

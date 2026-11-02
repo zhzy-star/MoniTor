@@ -180,15 +180,16 @@ class ScorePrefetchTests(unittest.TestCase):
             self.assertEqual(len(api.calls), frames)
             self.assertEqual(len(result), frames)
 
-    def test_config_and_command_flags_validate_and_allow_serial_fallback(self):
+    def test_config_and_command_flags_default_to_serial_and_allow_prefetch(self):
         root = Path(__file__).resolve().parents[1]
         config = read_config(root / "configs/ucf.json")
         command = build_commands(config, "score")[0]
+        self.assertEqual(command[command.index("--request_workers") + 1], "1")
+        self.assertEqual(command[command.index("--prefetch_frames") + 1], "0")
+        config.update(score_request_workers=3, score_prefetch_frames=1)
+        command = build_commands(config, "score")[0]
         self.assertEqual(command[command.index("--request_workers") + 1], "3")
         self.assertEqual(command[command.index("--prefetch_frames") + 1], "1")
-        config.update(score_request_workers=1, score_prefetch_frames=0)
-        command = build_commands(config, "score")[0]
-        self.assertEqual(command[command.index("--prefetch_frames") + 1], "0")
         for key, invalid in (("score_request_workers", 0), ("score_request_workers", True),
                              ("score_prefetch_frames", 2), ("score_prefetch_frames", False),
                              ("score_prefetch_frames", 1.0)):

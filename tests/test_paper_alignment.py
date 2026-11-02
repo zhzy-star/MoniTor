@@ -167,11 +167,17 @@ class PaperAlignmentTests(unittest.TestCase):
         self.assertEqual(config["score_alpha"], 0.7)
         self.assertEqual(config["score_previous"], "raw")
         self.assertEqual(config["score_queue_source"], "raw")
+        self.assertEqual(config["score_request_workers"], 1)
+        self.assertEqual(config["score_prefetch_frames"], 0)
         for stage in ("caption-index", "clean", "score"):
             self.assertNotIn("--paper_alignment", build_commands(config, stage)[0])
         command = build_commands(config, "memory-embeddings")[0]
         self.assertIn("src.model.memory_embeddings", command)
         self.assertEqual(command[command.index("--output_dir") + 1], config["memory_embeddings_dir"])
+        summary_command = build_commands(config, "summarize")[0]
+        self.assertEqual(summary_command[summary_command.index("--model") + 1], "glm-4-flash")
+        score_command = build_commands(config, "score")[0]
+        self.assertEqual(score_command[score_command.index("--model") + 1], "glm-4-flash")
         with self.assertRaisesRegex(ValueError, "UCF reference pipeline"):
             build_commands(config, "refine")
         with self.assertRaisesRegex(ValueError, "raw final scores"):
